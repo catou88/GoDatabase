@@ -1,0 +1,45 @@
+name: PR Sync
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+
+concurrency:
+  group: pr-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Sync PR metadata from linked issue
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Sync labels and milestone
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553
+        with:
+          script: |
+            const sync = require('./.github/scripts/sync-pr-metadata.cjs');
+            await sync({ github, context, core });
+
+      - name: Sync project status
+        if: ${{ env.PROJECT_URL != '' && env.PROJECT_TOKEN != '' }}
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553
+        env:
+          PROJECT_URL: ${{ vars.PROJECT_URL }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          PROJECT_STATUS: Review
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const sync = require('./.github/scripts/sync-pr-project.cjs');
+            await sync({ github, context, core });
