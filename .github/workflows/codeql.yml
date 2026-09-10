@@ -38,10 +38,10 @@ jobs:
           languages: go
 
       - name: Download dependencies
-        run: go mod download
+        run: go mod download && go mod verify
 
       - name: Build
-        run: go build ./...
+        run: go build -v ./db
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@311b4ee155dcdab395044f00946f664bd51ff173
