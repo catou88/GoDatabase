@@ -40,10 +40,25 @@ jobs:
         run: test -z "$(gofmt -l .)"
 
       - name: Run tests
-        run: go test ./... -count=1
+        run: |
+          if find . -name "*.go" -not -path "./vendor/*" | grep -q .; then
+            go test ./... -count=1
+          else
+            echo "No Go files found; skipping tests."
+          fi
 
       - name: Run race tests
-        run: go test -race ./... -count=1
+        run: |
+          if find . -name "*.go" -not -path "./vendor/*" | grep -q .; then
+            go test -race ./... -count=1
+          else
+            echo "No Go files found; skipping race tests."
+          fi
 
       - name: Run vet
-        run: go vet ./...
+        run: |
+          if find . -name "*.go" -not -path "./vendor/*" | grep -q .; then
+            go vet ./...
+          else
+            echo "No Go files found; skipping vet."
+          fi
