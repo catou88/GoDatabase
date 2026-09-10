@@ -34,7 +34,7 @@ jobs:
           cache: true
 
       - name: Download dependencies
-        run: go mod download
+        run: go mod download && go mod verify
 
       - name: Verify formatting
         run: test -z "$(gofmt -l .)"
