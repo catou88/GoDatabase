@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Go ${{ matrix.go-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.22", "1.23"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download && go mod verify
+
+      - name: Verify formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run tests
+        run: |
+          if find . -name "*.go" -not -path "./vendor/*" | grep -q .; then
+            go test ./... -count=1
+          else
+            echo "No Go files found; skipping tests."
+          fi
+
+      - name: Run race tests
+        run: |
+          if find . -name "*.go" -not -path "./vendor/*" | grep -q .; then
+            go test -race ./... -count=1
+          else
+            echo "No Go files found; skipping race tests."
+          fi
+
+      - name: Run vet
+        run: |
+          if find . -name "*.go" -not -path "./vendor/*" | grep -q .; then
+            go vet ./...
+          else
+            echo "No Go files found; skipping vet."
+          fi
