@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: pr-conventions-${{ github.event.pull_request.number }}
@@ -30,9 +30,30 @@ jobs:
             const linkedIssuePattern = /\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#\d+\b/i;
 
             const errors = [];
+            let title = pr.title;
+
+            if (isDependabot && !dependabotTitlePattern.test(title)) {
+              title = title.replace(/^Bump\b/i, 'bump');
+              title = title.replace(/\s+/g, ' ').trim();
+              title = `chore(deps): ${title}`;
+
+              if (title.length > 120) {
+                title = title.slice(0, 117).trimEnd() + '...';
+              }
+
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                title,
+              });
+
+              core.info(`Updated Dependabot PR title to: ${title}`);
+            }
+
             const validTitle = isDependabot
-              ? dependabotTitlePattern.test(pr.title)
-              : humanTitlePattern.test(pr.title);
+              ? dependabotTitlePattern.test(title)
+              : humanTitlePattern.test(title);
 
             if (!validTitle) {
               errors.push(
