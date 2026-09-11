@@ -23,18 +23,24 @@ jobs:
         with:
           script: |
             const pr = context.payload.pull_request;
-            const titlePattern = /^(feat|fix|docs|test|ci|refactor|perf|chore|build|revert)(\([a-z0-9-]+\))?: .{1,72}$/;
+            const author = pr.user?.login || '';
+            const isDependabot = author === 'dependabot[bot]';
+            const humanTitlePattern = /^(feat|fix|docs|test|ci|refactor|perf|chore|build|revert)(\([a-z0-9-]+\))?: .{1,72}$/;
+            const dependabotTitlePattern = /^chore\(deps\): .{1,120}$/;
             const linkedIssuePattern = /\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#\d+\b/i;
 
             const errors = [];
+            const validTitle = isDependabot
+              ? dependabotTitlePattern.test(pr.title)
+              : humanTitlePattern.test(pr.title);
 
-            if (!titlePattern.test(pr.title)) {
+            if (!validTitle) {
               errors.push(
-                'PR title must use Conventional Commits, for example: `feat(btree): add node search`.'
+                'PR title must use Conventional Commits, for example: `feat(btree): add node search` or `chore(deps): bump actions/checkout`.'
               );
             }
 
-            if (!linkedIssuePattern.test(pr.body || '')) {
+            if (!isDependabot && !linkedIssuePattern.test(pr.body || '')) {
               errors.push(
                 'PR body must link an issue with a closing keyword, for example: `Closes #12`.'
               );
@@ -43,4 +49,3 @@ jobs:
             if (errors.length > 0) {
               core.setFailed(errors.join('\n'));
             }
-
