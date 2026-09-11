@@ -3,53 +3,154 @@ package db
 import "testing"
 
 func TestDatabaseSetAndGet(t *testing.T) {
-	db := New()
-
-	if err := db.Set("alpha", "one"); err != nil {
-		t.Fatalf("Set returned error: %v", err)
+	tests := []struct {
+		name      string
+		key       string
+		value     string
+		wantValue string
+	}{
+		{
+			name:      "stores value for key",
+			key:       "alpha",
+			value:     "one",
+			wantValue: "one",
+		},
+		{
+			name:      "stores empty value",
+			key:       "empty",
+			value:     "",
+			wantValue: "",
+		},
 	}
 
-	value, ok := db.Get("alpha")
-	if !ok {
-		t.Fatal("expected alpha to exist")
-	}
-	if value != "one" {
-		t.Fatalf("expected alpha to be one, got %q", value)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := New()
+
+			if err := db.Set(tt.key, tt.value); err != nil {
+				t.Fatalf("Set returned error: %v", err)
+			}
+
+			value, ok := db.Get(tt.key)
+			if !ok {
+				t.Fatalf("expected %q to exist", tt.key)
+			}
+			if value != tt.wantValue {
+				t.Fatalf("expected %q to be %q, got %q", tt.key, tt.wantValue, value)
+			}
+		})
 	}
 }
 
 func TestDatabaseOverwrite(t *testing.T) {
-	db := New()
+	tests := []struct {
+		name      string
+		key       string
+		first     string
+		second    string
+		wantValue string
+	}{
+		{
+			name:      "replaces existing value",
+			key:       "alpha",
+			first:     "one",
+			second:    "two",
+			wantValue: "two",
+		},
+		{
+			name:      "replaces value with empty value",
+			key:       "alpha",
+			first:     "one",
+			second:    "",
+			wantValue: "",
+		},
+	}
 
-	if err := db.Set("alpha", "one"); err != nil {
-		t.Fatalf("first Set returned error: %v", err)
-	}
-	if err := db.Set("alpha", "two"); err != nil {
-		t.Fatalf("overwrite Set returned error: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := New()
 
-	value, ok := db.Get("alpha")
-	if !ok {
-		t.Fatal("expected alpha to exist after overwrite")
-	}
-	if value != "two" {
-		t.Fatalf("expected alpha to be two, got %q", value)
+			if err := db.Set(tt.key, tt.first); err != nil {
+				t.Fatalf("first Set returned error: %v", err)
+			}
+			if err := db.Set(tt.key, tt.second); err != nil {
+				t.Fatalf("overwrite Set returned error: %v", err)
+			}
+
+			value, ok := db.Get(tt.key)
+			if !ok {
+				t.Fatalf("expected %q to exist after overwrite", tt.key)
+			}
+			if value != tt.wantValue {
+				t.Fatalf("expected %q to be %q, got %q", tt.key, tt.wantValue, value)
+			}
+		})
 	}
 }
 
 func TestDatabaseDelete(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		seed       map[string]string
+		wantDelete bool
+		wantExists bool
+	}{
+		{
+			name:       "deletes existing key",
+			key:        "alpha",
+			seed:       map[string]string{"alpha": "one"},
+			wantDelete: true,
+			wantExists: false,
+		},
+		{
+			name:       "returns false for missing key",
+			key:        "missing",
+			seed:       map[string]string{"alpha": "one"},
+			wantDelete: false,
+			wantExists: false,
+		},
+		{
+			name:       "returns false for missing key in empty database",
+			key:        "missing",
+			seed:       nil,
+			wantDelete: false,
+			wantExists: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := New()
+			for key, value := range tt.seed {
+				if err := db.Set(key, value); err != nil {
+					t.Fatalf("Set returned error: %v", err)
+				}
+			}
+
+			deleted := db.Delete(tt.key)
+			if deleted != tt.wantDelete {
+				t.Fatalf("expected Delete(%q) to return %v, got %v", tt.key, tt.wantDelete, deleted)
+			}
+
+			_, ok := db.Get(tt.key)
+			if ok != tt.wantExists {
+				t.Fatalf("expected Get(%q) existence to be %v, got %v", tt.key, tt.wantExists, ok)
+			}
+		})
+	}
+}
+
+func TestDatabaseGetMissingKey(t *testing.T) {
 	db := New()
 
 	if err := db.Set("alpha", "one"); err != nil {
 		t.Fatalf("Set returned error: %v", err)
 	}
 
-	if !db.Delete("alpha") {
-		t.Fatal("expected alpha to be deleted")
-	}
-
-	if _, ok := db.Get("alpha"); ok {
-		t.Fatal("alpha should not exist after delete")
+	value, ok := db.Get("missing")
+	if ok {
+		t.Fatalf("expected missing key to not exist, got value %q", value)
 	}
 }
 
