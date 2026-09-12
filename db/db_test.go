@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -42,6 +43,14 @@ func TestDatabaseSetAndGet(t *testing.T) {
 				t.Fatalf("expected %q to be %q, got %q", tt.key, tt.wantValue, value)
 			}
 		})
+	}
+}
+
+func TestDatabaseSetRejectsEmptyKey(t *testing.T) {
+	db := New()
+
+	if err := db.Set("", "value"); !errors.Is(err, ErrEmptyKey) {
+		t.Fatalf("expected ErrEmptyKey, got %v", err)
 	}
 }
 
@@ -215,6 +224,24 @@ func TestDatabaseRange(t *testing.T) {
 				{Key: "b", Value: "two"},
 				{Key: "c", Value: "three"},
 			},
+		},
+		{
+			name:  "empty start follows string ordering",
+			seed:  map[string]string{"a": "one", "b": "two", "c": "three", "d": "four"},
+			start: "",
+			end:   "c",
+			want: []Item{
+				{Key: "a", Value: "one"},
+				{Key: "b", Value: "two"},
+				{Key: "c", Value: "three"},
+			},
+		},
+		{
+			name:  "empty end follows start greater than end rule",
+			seed:  map[string]string{"a": "one", "b": "two", "c": "three"},
+			start: "a",
+			end:   "",
+			want:  []Item{},
 		},
 	}
 
