@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestDatabaseSetAndGet(t *testing.T) {
 	tests := []struct {
@@ -155,29 +158,79 @@ func TestDatabaseGetMissingKey(t *testing.T) {
 }
 
 func TestDatabaseRange(t *testing.T) {
-	db := New()
-	for _, pair := range []struct{ key, value string }{
-		{"b", "two"},
-		{"a", "one"},
-		{"c", "three"},
-	} {
-		if err := db.Set(pair.key, pair.value); err != nil {
-			t.Fatalf("Set returned error: %v", err)
-		}
+	tests := []struct {
+		name  string
+		seed  map[string]string
+		start string
+		end   string
+		want  []Item
+	}{
+		{
+			name:  "empty database returns no items",
+			seed:  nil,
+			start: "a",
+			end:   "z",
+			want:  []Item{},
+		},
+		{
+			name:  "no matching keys returns no items",
+			seed:  map[string]string{"a": "one", "b": "two", "c": "three"},
+			start: "x",
+			end:   "z",
+			want:  []Item{},
+		},
+		{
+			name:  "start equals end returns matching key",
+			seed:  map[string]string{"a": "one", "b": "two", "c": "three"},
+			start: "b",
+			end:   "b",
+			want: []Item{
+				{Key: "b", Value: "two"},
+			},
+		},
+		{
+			name:  "start greater than end returns no items",
+			seed:  map[string]string{"a": "one", "b": "two", "c": "three"},
+			start: "c",
+			end:   "a",
+			want:  []Item{},
+		},
+		{
+			name:  "excludes keys outside bounds",
+			seed:  map[string]string{"a": "one", "b": "two", "c": "three", "d": "four"},
+			start: "b",
+			end:   "c",
+			want: []Item{
+				{Key: "b", Value: "two"},
+				{Key: "c", Value: "three"},
+			},
+		},
+		{
+			name:  "returns keys sorted ascending",
+			seed:  map[string]string{"c": "three", "a": "one", "b": "two"},
+			start: "a",
+			end:   "c",
+			want: []Item{
+				{Key: "a", Value: "one"},
+				{Key: "b", Value: "two"},
+				{Key: "c", Value: "three"},
+			},
+		},
 	}
 
-	values := db.Range("a", "c")
-	if len(values) != 3 {
-		t.Fatalf("expected 3 values in range, got %d", len(values))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := New()
+			for key, value := range tt.seed {
+				if err := db.Set(key, value); err != nil {
+					t.Fatalf("Set returned error: %v", err)
+				}
+			}
 
-	if values[0].Key != "a" || values[0].Value != "one" {
-		t.Fatalf("first range item mismatch: %#v", values[0])
-	}
-	if values[1].Key != "b" || values[1].Value != "two" {
-		t.Fatalf("second range item mismatch: %#v", values[1])
-	}
-	if values[2].Key != "c" || values[2].Value != "three" {
-		t.Fatalf("third range item mismatch: %#v", values[2])
+			got := db.Range(tt.start, tt.end)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Range(%q, %q) = %#v, want %#v", tt.start, tt.end, got, tt.want)
+			}
+		})
 	}
 }
