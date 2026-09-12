@@ -1,6 +1,12 @@
 package db
 
-import "sort"
+import (
+	"errors"
+	"sort"
+)
+
+// ErrEmptyKey is returned when a write operation receives an empty key.
+var ErrEmptyKey = errors.New("key cannot be empty")
 
 // Item represents a key-value record stored in the in-memory database.
 type Item struct {
@@ -20,6 +26,9 @@ func New() *Database {
 
 // Set stores a value for a key.
 func (d *Database) Set(key, value string) error {
+	if key == "" {
+		return ErrEmptyKey
+	}
 	d.data[key] = value
 	return nil
 }
