@@ -5,6 +5,13 @@ type tree struct {
 	maxKeys int
 }
 
+func (t *tree) minKeys() int {
+	if t.maxKeys == 0 {
+		t.maxKeys = 3
+	}
+	return t.maxKeys / 2
+}
+
 func (t *tree) get(key string) (string, bool) {
 	if t.root == nil {
 		return "", false
@@ -134,4 +141,145 @@ func insertNode(nodes []*node, idx int, value *node) []*node {
 	copy(nodes[idx+1:], nodes[idx:])
 	nodes[idx] = value
 	return nodes
+}
+
+func (t *tree) delete(key string) bool {
+	if t.root == nil {
+		return false
+	}
+
+	deleted := t.deleteFromNode(t.root, key)
+	if !deleted {
+		return false
+	}
+
+	if len(t.root.keys) == 0 {
+		if t.root.leaf {
+			t.root = nil
+		} else {
+			t.root = t.root.children[0]
+		}
+	}
+
+	return true
+}
+
+func (t *tree) deleteFromNode(n *node, key string) bool {
+	if n.leaf {
+		idx, found := n.search(key)
+		if !found {
+			return false
+		}
+		n.keys = deleteString(n.keys, idx)
+		n.values = deleteString(n.values, idx)
+		return true
+	}
+
+	childIdx := n.childIndex(key)
+	deleted := t.deleteFromNode(n.children[childIdx], key)
+	if !deleted {
+		return false
+	}
+
+	if childIdx > 0 && len(n.children[childIdx].keys) > 0 {
+		n.keys[childIdx-1] = minKey(n.children[childIdx])
+	}
+	if len(n.children[childIdx].keys) < t.minKeys() {
+		t.rebalanceChild(n, childIdx)
+	}
+
+	return true
+}
+
+func (t *tree) rebalanceChild(parent *node, childIdx int) {
+	if childIdx > 0 && len(parent.children[childIdx-1].keys) > t.minKeys() {
+		rotateFromLeft(parent, childIdx)
+		return
+	}
+	if childIdx+1 < len(parent.children) && len(parent.children[childIdx+1].keys) > t.minKeys() {
+		rotateFromRight(parent, childIdx)
+		return
+	}
+	if childIdx > 0 {
+		mergeChildren(parent, childIdx-1)
+		return
+	}
+	mergeChildren(parent, childIdx)
+}
+
+func rotateFromLeft(parent *node, childIdx int) {
+	left := parent.children[childIdx-1]
+	child := parent.children[childIdx]
+
+	if child.leaf {
+		last := len(left.keys) - 1
+		child.keys = insertString(child.keys, 0, left.keys[last])
+		child.values = insertString(child.values, 0, left.values[last])
+		left.keys = left.keys[:last]
+		left.values = left.values[:last]
+		parent.keys[childIdx-1] = child.keys[0]
+		return
+	}
+
+	last := len(left.keys) - 1
+	child.keys = insertString(child.keys, 0, parent.keys[childIdx-1])
+	child.children = insertNode(child.children, 0, left.children[len(left.children)-1])
+	parent.keys[childIdx-1] = left.keys[last]
+	left.keys = left.keys[:last]
+	left.children = left.children[:len(left.children)-1]
+}
+
+func rotateFromRight(parent *node, childIdx int) {
+	child := parent.children[childIdx]
+	right := parent.children[childIdx+1]
+
+	if child.leaf {
+		child.keys = append(child.keys, right.keys[0])
+		child.values = append(child.values, right.values[0])
+		right.keys = deleteString(right.keys, 0)
+		right.values = deleteString(right.values, 0)
+		parent.keys[childIdx] = right.keys[0]
+		return
+	}
+
+	child.keys = append(child.keys, parent.keys[childIdx])
+	child.children = append(child.children, right.children[0])
+	parent.keys[childIdx] = right.keys[0]
+	right.keys = deleteString(right.keys, 0)
+	right.children = deleteNode(right.children, 0)
+}
+
+func mergeChildren(parent *node, leftIdx int) {
+	left := parent.children[leftIdx]
+	right := parent.children[leftIdx+1]
+
+	if left.leaf {
+		left.keys = append(left.keys, right.keys...)
+		left.values = append(left.values, right.values...)
+		left.next = right.next
+	} else {
+		left.keys = append(left.keys, parent.keys[leftIdx])
+		left.keys = append(left.keys, right.keys...)
+		left.children = append(left.children, right.children...)
+	}
+
+	parent.keys = deleteString(parent.keys, leftIdx)
+	parent.children = deleteNode(parent.children, leftIdx+1)
+}
+
+func minKey(n *node) string {
+	for !n.leaf {
+		n = n.children[0]
+	}
+	return n.keys[0]
+}
+
+func deleteString(values []string, idx int) []string {
+	copy(values[idx:], values[idx+1:])
+	return values[:len(values)-1]
+}
+
+func deleteNode(nodes []*node, idx int) []*node {
+	copy(nodes[idx:], nodes[idx+1:])
+	return nodes[:len(nodes)-1]
 }
