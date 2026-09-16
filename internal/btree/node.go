@@ -32,3 +32,11 @@ func (n *node) childIndex(key string) int {
 func (n *node) child(key string) *node {
 	return n.children[n.childIndex(key)]
 }
+
+func (n *node) valueAt(index int) string {
+	return n.values[index]
+}
+
+func (n *node) nextLeaf() *node {
+	return n.next
+}

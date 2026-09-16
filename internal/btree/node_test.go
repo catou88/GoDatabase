@@ -194,3 +194,28 @@ func TestNodeChild(t *testing.T) {
 		t.Fatalf("child after last separator = %p, want %p", got, right)
 	}
 }
+
+func TestNodeValueAt(t *testing.T) {
+	n := &node{
+		leaf:   true,
+		keys:   []string{"a", "b"},
+		values: []string{"one", "two"},
+	}
+
+	if got := n.valueAt(1); got != "two" {
+		t.Fatalf("valueAt(1) = %q, want %q", got, "two")
+	}
+}
+
+func TestNodeNextLeaf(t *testing.T) {
+	right := &node{leaf: true, keys: []string{"c"}}
+	left := &node{
+		leaf: true,
+		keys: []string{"a"},
+		next: right,
+	}
+
+	if got := left.nextLeaf(); got != right {
+		t.Fatalf("nextLeaf() = %p, want %p", got, right)
+	}
+}
