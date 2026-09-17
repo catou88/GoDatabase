@@ -46,7 +46,7 @@ func TestEncodeDecodeEmptyLeafPageNode(t *testing.T) {
 
 func TestEncodeDecodeInternalPageNode(t *testing.T) {
 	want := &pageNode{
-		keys:       []string{"g", "r"},
+		keys:       []string{"", "g", "r"},
 		childPages: []uint64{2, 5, 8},
 	}
 
@@ -74,13 +74,22 @@ func TestEncodePageNodeRejectsInvalidNodes(t *testing.T) {
 			wantErr: "node is nil",
 		},
 		{
-			name: "empty key",
+			name: "empty key outside sentinel position",
+			node: &pageNode{
+				leaf:   true,
+				keys:   []string{"a", ""},
+				values: []string{"value", "bad"},
+			},
+			wantErr: "empty",
+		},
+		{
+			name: "sentinel with value",
 			node: &pageNode{
 				leaf:   true,
 				keys:   []string{""},
-				values: []string{"value"},
+				values: []string{"not-user-data"},
 			},
-			wantErr: "empty",
+			wantErr: "sentinel",
 		},
 		{
 			name: "unsorted keys",
@@ -99,6 +108,39 @@ func TestEncodePageNodeRejectsInvalidNodes(t *testing.T) {
 				values: []string{"one", "two"},
 			},
 			wantErr: "sorted",
+		},
+		{
+			name: "key exceeds maximum size",
+			node: &pageNode{
+				leaf:   true,
+				keys:   []string{strings.Repeat("k", maxKeySize+1)},
+				values: []string{"value"},
+			},
+			wantErr: "key",
+		},
+		{
+			name: "value exceeds maximum size",
+			node: &pageNode{
+				leaf:   true,
+				keys:   []string{"key"},
+				values: []string{strings.Repeat("v", maxValueSize+1)},
+			},
+			wantErr: "value",
+		},
+		{
+			name: "encoded node exceeds page size",
+			node: &pageNode{
+				leaf: true,
+				keys: []string{
+					strings.Repeat("a", maxKeySize),
+					strings.Repeat("b", maxKeySize),
+				},
+				values: []string{
+					strings.Repeat("x", maxValueSize),
+					strings.Repeat("y", maxValueSize),
+				},
+			},
+			wantErr: "exceeds page size",
 		},
 		{
 			name: "leaf value count mismatch",
@@ -124,7 +166,7 @@ func TestEncodePageNodeRejectsInvalidNodes(t *testing.T) {
 			node: &pageNode{
 				keys:       []string{"m"},
 				values:     []string{"bad"},
-				childPages: []uint64{2, 3},
+				childPages: []uint64{2},
 			},
 			wantErr: "values",
 		},
@@ -132,7 +174,7 @@ func TestEncodePageNodeRejectsInvalidNodes(t *testing.T) {
 			name: "internal child count mismatch",
 			node: &pageNode{
 				keys:       []string{"m"},
-				childPages: []uint64{2},
+				childPages: []uint64{2, 3},
 			},
 			wantErr: "child pages",
 		},
@@ -140,7 +182,7 @@ func TestEncodePageNodeRejectsInvalidNodes(t *testing.T) {
 			name: "internal zero child page",
 			node: &pageNode{
 				keys:       []string{"m"},
-				childPages: []uint64{2, 0},
+				childPages: []uint64{0},
 			},
 			wantErr: "zero",
 		},
@@ -209,30 +251,21 @@ func TestDecodePageNodeRejectsMalformedPages(t *testing.T) {
 			wantErr: errInvalidNodeType.Error(),
 		},
 		{
-			name: "first offset is not zero",
-			page: func() []byte {
-				page := cloneBytes(validPage)
-				offsetStart := pageHeaderSize
-				binary.LittleEndian.PutUint16(page[offsetStart:], 1)
-				return page
-			},
-			wantErr: "first offset",
-		},
-		{
 			name: "offset moves backward",
 			page: func() []byte {
 				page := cloneBytes(validPage)
-				offsetStart := pageHeaderSize
-				binary.LittleEndian.PutUint16(page[offsetStart+pageOffsetSize:], 0)
+				offsetStart := pageHeaderSize + 2*pagePtrSize
+				binary.LittleEndian.PutUint16(page[offsetStart:], 8)
+				binary.LittleEndian.PutUint16(page[offsetStart+pageOffsetSize:], 7)
 				return page
 			},
-			wantErr: "too small",
+			wantErr: "backward",
 		},
 		{
 			name: "record length mismatch",
 			page: func() []byte {
 				page := cloneBytes(validPage)
-				recordStart := pageHeaderSize + 3*pageOffsetSize
+				recordStart := pageHeaderSize + 2*pagePtrSize + 2*pageOffsetSize
 				binary.LittleEndian.PutUint16(page[recordStart:], 10)
 				return page
 			},
@@ -243,15 +276,15 @@ func TestDecodePageNodeRejectsMalformedPages(t *testing.T) {
 			page: func() []byte {
 				page, err := encodePageNode(&pageNode{
 					keys:       []string{"m"},
-					childPages: []uint64{2, 3},
+					childPages: []uint64{2},
 				})
 				if err != nil {
 					t.Fatalf("encodePageNode() error = %v", err)
 				}
-				recordStart := pageHeaderSize + 2*pagePtrSize + 2*pageOffsetSize
+				recordStart := pageHeaderSize + pagePtrSize + pageOffsetSize
 				binary.LittleEndian.PutUint16(page[recordStart+2:], 1)
 				page[recordStart+5] = 'x'
-				binary.LittleEndian.PutUint16(page[pageHeaderSize+2*pagePtrSize+pageOffsetSize:], 6)
+				binary.LittleEndian.PutUint16(page[pageHeaderSize+pagePtrSize:], 6)
 				return page
 			},
 			wantErr: "internal",
@@ -261,7 +294,7 @@ func TestDecodePageNodeRejectsMalformedPages(t *testing.T) {
 			page: func() []byte {
 				page, err := encodePageNode(&pageNode{
 					keys:       []string{"m"},
-					childPages: []uint64{2, 3},
+					childPages: []uint64{2},
 				})
 				if err != nil {
 					t.Fatalf("encodePageNode() error = %v", err)
@@ -284,6 +317,82 @@ func TestDecodePageNodeRejectsMalformedPages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBNodeAccessorsAndEncodedSize(t *testing.T) {
+	node := BNode(make([]byte, pageSize))
+	node.setHeader(nodeTypeLeaf, 2)
+	if err := nodeAppendKV(node, 0, 0, []byte("a"), []byte("one")); err != nil {
+		t.Fatalf("nodeAppendKV(first) error = %v", err)
+	}
+	if err := nodeAppendKV(node, 1, 0, []byte("b"), []byte("two")); err != nil {
+		t.Fatalf("nodeAppendKV(second) error = %v", err)
+	}
+
+	if got := node.btype(); got != nodeTypeLeaf {
+		t.Fatalf("btype() = %d, want %d", got, nodeTypeLeaf)
+	}
+	if got := node.nkeys(); got != 2 {
+		t.Fatalf("nkeys() = %d, want 2", got)
+	}
+	if got := string(node.getKey(0)); got != "a" {
+		t.Fatalf("getKey(0) = %q, want %q", got, "a")
+	}
+	if got := string(node.getVal(1)); got != "two" {
+		t.Fatalf("getVal(1) = %q, want %q", got, "two")
+	}
+	if got, want := node.getOffset(1), uint16(8); got != want {
+		t.Fatalf("getOffset(1) = %d, want %d", got, want)
+	}
+	if got, want := node.nbytes(), uint16(pageHeaderSize+2*(pagePtrSize+pageOffsetSize)+16); got != want {
+		t.Fatalf("nbytes() = %d, want %d", got, want)
+	}
+	if err := validateBNode(node); err != nil {
+		t.Fatalf("validateBNode() error = %v", err)
+	}
+}
+
+func TestNodeAppendRangeCopiesEncodedEntries(t *testing.T) {
+	sourcePage, err := encodePageNode(&pageNode{
+		keys:       []string{"", "m", "z"},
+		childPages: []uint64{2, 5, 8},
+	})
+	if err != nil {
+		t.Fatalf("encodePageNode() error = %v", err)
+	}
+
+	destination := BNode(make([]byte, pageSize))
+	destination.setHeader(nodeTypeInternal, 2)
+	if err := nodeAppendRange(destination, BNode(sourcePage), 0, 1, 2); err != nil {
+		t.Fatalf("nodeAppendRange() error = %v", err)
+	}
+
+	got, err := decodePageNode(destination)
+	if err != nil {
+		t.Fatalf("decodePageNode() error = %v", err)
+	}
+	assertPageNodeEqual(t, got, &pageNode{
+		keys:       []string{"m", "z"},
+		childPages: []uint64{5, 8},
+	})
+}
+
+func TestEncodeDecodeSentinelKey(t *testing.T) {
+	want := &pageNode{
+		leaf:   true,
+		keys:   []string{"", "a"},
+		values: []string{"", "value"},
+	}
+
+	page, err := encodePageNode(want)
+	if err != nil {
+		t.Fatalf("encodePageNode() error = %v", err)
+	}
+	got, err := decodePageNode(page)
+	if err != nil {
+		t.Fatalf("decodePageNode() error = %v", err)
+	}
+	assertPageNodeEqual(t, got, want)
 }
 
 func cloneBytes(values []byte) []byte {
