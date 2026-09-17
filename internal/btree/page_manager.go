@@ -43,6 +43,7 @@ var (
 type pageManager struct {
 	file               *os.File
 	nextPageID         uint64
+	committedPageCount uint64
 	rootPageID         uint64
 	generation         uint64
 	freePageIDs        []uint64
@@ -99,14 +100,15 @@ func openPageManager(path string) (*pageManager, error) {
 	}
 
 	return &pageManager{
-		file:            file,
-		nextPageID:      nextPageID,
-		rootPageID:      metadata.rootPageID,
-		generation:      metadata.generation,
-		freePageIDs:     metadata.freePageIDs,
-		retiredPageIDs:  metadata.retiredPageIDs,
-		freePageSet:     freePageSet,
-		freeListPageIDs: metadata.freeListPageIDs,
+		file:               file,
+		nextPageID:         nextPageID,
+		committedPageCount: metadata.pageCount,
+		rootPageID:         metadata.rootPageID,
+		generation:         metadata.generation,
+		freePageIDs:        metadata.freePageIDs,
+		retiredPageIDs:     metadata.retiredPageIDs,
+		freePageSet:        freePageSet,
+		freeListPageIDs:    metadata.freeListPageIDs,
 	}, nil
 }
 
@@ -263,6 +265,7 @@ func (pm *pageManager) publishRoot(
 
 	pm.rootPageID = rootPageID
 	pm.generation = nextGeneration
+	pm.committedPageCount = metadata.pageCount
 	pm.pendingFreePageIDs = nil
 	pm.freePageSet = make(map[uint64]struct{}, len(pm.freePageIDs))
 	for _, pageID := range pm.freePageIDs {
@@ -382,6 +385,7 @@ func removePageID(pageIDs []uint64, target uint64) []uint64 {
 
 type pageManagerState struct {
 	nextPageID         uint64
+	committedPageCount uint64
 	rootPageID         uint64
 	generation         uint64
 	freePageIDs        []uint64
@@ -393,6 +397,7 @@ type pageManagerState struct {
 func (pm *pageManager) snapshot() pageManagerState {
 	return pageManagerState{
 		nextPageID:         pm.nextPageID,
+		committedPageCount: pm.committedPageCount,
 		rootPageID:         pm.rootPageID,
 		generation:         pm.generation,
 		freePageIDs:        append([]uint64(nil), pm.freePageIDs...),
@@ -404,6 +409,7 @@ func (pm *pageManager) snapshot() pageManagerState {
 
 func (pm *pageManager) restore(state pageManagerState) {
 	pm.nextPageID = state.nextPageID
+	pm.committedPageCount = state.committedPageCount
 	pm.rootPageID = state.rootPageID
 	pm.generation = state.generation
 	pm.freePageIDs = append([]uint64(nil), state.freePageIDs...)

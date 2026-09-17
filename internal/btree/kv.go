@@ -266,8 +266,15 @@ func loadCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 	}
 	leafDepth := -1
 	visiting := make(map[uint64]bool)
-	var walk func(uint64, int) error
-	walk = func(pageID uint64, depth int) error {
+	type keyBound struct {
+		key []byte
+		set bool
+	}
+	var walk func(uint64, int, keyBound, keyBound, bool) error
+	walk = func(pageID uint64, depth int, lower, upper keyBound, root bool) error {
+		if pageID == 0 || pageID > pm.committedPageCount {
+			return fmt.Errorf("invalid child page id %d", pageID)
+		}
 		if visiting[pageID] {
 			return fmt.Errorf("B+Tree contains a page cycle at %d", pageID)
 		}
@@ -286,6 +293,23 @@ func loadCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 		if node.nkeys() == 0 {
 			return fmt.Errorf("page %d has no entries", pageID)
 		}
+		if int(node.nbytes()) > pageSize {
+			return fmt.Errorf("page %d exceeds page size", pageID)
+		}
+		if root && len(node.getKey(0)) != 0 {
+			return fmt.Errorf("root page %d is missing the lower-bound sentinel", pageID)
+		}
+		if root && node.btype() == nodeTypeInternal && node.nkeys() < 2 {
+			return fmt.Errorf("internal root page %d has fewer than two children", pageID)
+		}
+		firstKey := node.getKey(0)
+		lastKey := node.getKey(node.nkeys() - 1)
+		if lower.set && !bytes.Equal(firstKey, lower.key) {
+			return fmt.Errorf("page %d lower bound %q does not match parent key %q", pageID, firstKey, lower.key)
+		}
+		if upper.set && bytes.Compare(lastKey, upper.key) >= 0 {
+			return fmt.Errorf("page %d key %q crosses upper bound %q", pageID, lastKey, upper.key)
+		}
 		pages[pageID] = node
 		if node.btype() == nodeTypeLeaf {
 			if leafDepth == -1 {
@@ -296,21 +320,40 @@ func loadCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 		} else {
 			for i := uint16(0); i < node.nkeys(); i++ {
 				childID := node.getPtr(i)
-				if err := walk(childID, depth+1); err != nil {
+				childLower := keyBound{key: node.getKey(i), set: true}
+				childUpper := upper
+				if i+1 < node.nkeys() {
+					childUpper = keyBound{key: node.getKey(i + 1), set: true}
+				}
+				if err := walk(childID, depth+1, childLower, childUpper, false); err != nil {
 					return err
 				}
-				if !bytes.Equal(node.getKey(i), pages[childID].getKey(0)) {
-					return fmt.Errorf("page %d child %d lower bound does not match", pageID, childID)
+			}
+			for i := uint16(0); i < node.nkeys(); i++ {
+				child := pages[node.getPtr(i)]
+				if int(child.nbytes()) > pageSize/4 {
+					continue
+				}
+				if i > 0 && encodedMergeSize(pages[node.getPtr(i-1)], child) <= pageSize {
+					return fmt.Errorf("page %d child %d is underfull and mergeable with its left sibling", pageID, node.getPtr(i))
+				}
+				if i+1 < node.nkeys() && encodedMergeSize(child, pages[node.getPtr(i+1)]) <= pageSize {
+					return fmt.Errorf("page %d child %d is underfull and mergeable with its right sibling", pageID, node.getPtr(i))
 				}
 			}
 		}
 		visiting[pageID] = false
 		return nil
 	}
-	if err := walk(pm.rootPage(), 0); err != nil {
+	if err := walk(pm.rootPage(), 0, keyBound{}, keyBound{}, true); err != nil {
 		return nil, err
 	}
 	return pages, nil
+}
+
+func encodedMergeSize(left, right BNode) int {
+	return pageHeaderSize + int(left.nkeys()+right.nkeys())*(pagePtrSize+pageOffsetSize) +
+		int(left.getOffset(left.nkeys())) + int(right.getOffset(right.nkeys()))
 }
 
 func recoverCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
@@ -327,7 +370,11 @@ func recoverCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 	}
 	if len(candidates) == 0 {
 		pm.restore(pageManagerState{nextPageID: pm.nextPageID})
-		return make(map[uint64]BNode), nil
+		pages := make(map[uint64]BNode)
+		if err := reconcilePageOwnership(pm, pages); err != nil {
+			return nil, err
+		}
+		return pages, nil
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].generation > candidates[j].generation
@@ -344,15 +391,24 @@ func recoverCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 			continue
 		}
 		pm.restore(pageManagerState{
-			nextPageID:      pm.nextPageID,
-			rootPageID:      metadata.rootPageID,
-			generation:      metadata.generation,
-			freePageIDs:     metadata.freePageIDs,
-			retiredPageIDs:  metadata.retiredPageIDs,
-			freeListPageIDs: metadata.freeListPageIDs,
+			nextPageID:         pm.nextPageID,
+			committedPageCount: metadata.pageCount,
+			rootPageID:         metadata.rootPageID,
+			generation:         metadata.generation,
+			freePageIDs:        metadata.freePageIDs,
+			retiredPageIDs:     metadata.retiredPageIDs,
+			freeListPageIDs:    metadata.freeListPageIDs,
 		})
 		pages, err := loadCommittedPages(pm)
 		if err == nil {
+			if err := reconcilePageOwnership(pm, pages); err != nil {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
+					"generation %d: %w",
+					metadata.generation,
+					err,
+				))
+				continue
+			}
 			return pages, nil
 		}
 		recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
@@ -362,6 +418,47 @@ func recoverCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 		))
 	}
 	return nil, fmt.Errorf("no valid committed B+Tree: %w", recoveryErr)
+}
+
+func reconcilePageOwnership(pm *pageManager, livePages map[uint64]BNode) error {
+	owners := make(map[uint64]string, len(livePages)+len(pm.freePageIDs)+len(pm.retiredPageIDs)+len(pm.freeListPageIDs))
+	claim := func(pageID uint64, owner string) error {
+		if pageID == 0 || pageID >= pm.nextPageID {
+			return fmt.Errorf("%s contains invalid page id %d", owner, pageID)
+		}
+		if previous, exists := owners[pageID]; exists {
+			return fmt.Errorf("page %d is owned by both %s and %s", pageID, previous, owner)
+		}
+		owners[pageID] = owner
+		return nil
+	}
+	for pageID := range livePages {
+		if err := claim(pageID, "live tree"); err != nil {
+			return err
+		}
+	}
+	for _, pageID := range pm.freePageIDs {
+		if err := claim(pageID, "reusable free list"); err != nil {
+			return err
+		}
+	}
+	for _, pageID := range pm.retiredPageIDs {
+		if err := claim(pageID, "protected free list"); err != nil {
+			return err
+		}
+	}
+	for _, pageID := range pm.freeListPageIDs {
+		if err := claim(pageID, "free-list structure"); err != nil {
+			return err
+		}
+	}
+	for pageID := uint64(1); pageID < pm.nextPageID; pageID++ {
+		if _, accountedFor := owners[pageID]; accountedFor {
+			continue
+		}
+		pm.pendingFreePageIDs = append(pm.pendingFreePageIDs, pageID)
+	}
+	return nil
 }
 
 func reachablePageMap(pages map[uint64]BNode, root uint64) map[uint64]BNode {
