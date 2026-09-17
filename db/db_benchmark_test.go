@@ -10,6 +10,7 @@ var (
 	benchmarkFound   bool
 	benchmarkDeleted bool
 	benchmarkItems   []Item
+	benchmarkError   error
 )
 
 var benchmarkDatasetSizes = []int{10, 1_000, 100_000}
@@ -40,7 +41,10 @@ func BenchmarkDatabaseGet(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				value, found = database.Get(keys[i%size])
+				value, found, benchmarkError = database.Get(keys[i%size])
+				if benchmarkError != nil {
+					b.Fatal(benchmarkError)
+				}
 			}
 
 			benchmarkValue = value
@@ -68,7 +72,10 @@ func BenchmarkDatabaseDelete(b *testing.B) {
 			for completed := 0; completed < b.N; {
 				batchSize := min(batchCapacity, b.N-completed)
 				for i := 0; i < batchSize; i++ {
-					deleted = databases[i/size].Delete(keys[i%size])
+					deleted, benchmarkError = databases[i/size].Delete(keys[i%size])
+					if benchmarkError != nil {
+						b.Fatal(benchmarkError)
+					}
 				}
 				completed += batchSize
 
@@ -95,7 +102,10 @@ func BenchmarkDatabaseRange(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				items = database.Range(keys[0], keys[len(keys)-1])
+				items, benchmarkError = database.Range(keys[0], keys[len(keys)-1])
+				if benchmarkError != nil {
+					b.Fatal(benchmarkError)
+				}
 			}
 
 			benchmarkItems = items
