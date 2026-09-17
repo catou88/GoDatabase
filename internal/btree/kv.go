@@ -12,6 +12,12 @@ import (
 
 var ErrClosed = errors.New("database is closed")
 
+// Entry is a key-value pair returned by a range scan.
+type Entry struct {
+	Key   []byte
+	Value []byte
+}
+
 // KV is a durable key-value store backed by copy-on-write B+Tree pages.
 type KV struct {
 	mu        sync.Mutex
@@ -87,6 +93,27 @@ func (kv *KV) Get(key []byte) ([]byte, bool, error) {
 		return nil, false, ErrClosed
 	}
 	return kv.tree.getValue(key)
+}
+
+// Range returns copies of entries whose keys are between start and end,
+// inclusive, ordered by ascending key. Empty bounds are ordinary keys, not
+// unbounded-range markers.
+func (kv *KV) Range(start, end []byte) ([]Entry, error) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.closed {
+		return nil, ErrClosed
+	}
+
+	entries, err := kv.tree.rangeValues(start, end)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Entry, len(entries))
+	for i, entry := range entries {
+		result[i] = Entry{Key: entry.key, Value: entry.value}
+	}
+	return result, nil
 }
 
 // Set durably stores value for key.

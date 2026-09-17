@@ -400,6 +400,55 @@ Fuzz tests should compare B+Tree behavior against a simple `map[string]string` r
 - Support inclusive public range bounds.
 - Consider an iterator API so large ranges do not require one result slice.
 
+### Add versioned trees with concurrent readers and writers
+
+The current durable `KV` serializes reads and writes with one mutex. This is a
+correctness-first implementation: a read cannot observe a root, page map, or
+close operation changing while it traverses the tree. A later concurrency
+milestone should replace this coarse locking with explicitly versioned trees.
+
+The intended model is:
+
+1. Every committed version has its own generation and root page ID.
+2. A reader pins a version and traverses the immutable pages reachable from
+   that root without holding a tree-wide lock.
+3. A writer forks a selected version, creates replacement pages with
+   copy-on-write, and owns a private root while making changes.
+4. Multiple readers and writers may use different roots concurrently. A writer
+   never modifies pages belonging to its base version or another writer.
+5. Finishing a writer creates a new, distinct committed version. It does not
+   merge changes into another writer's version and does not retry against a
+   newer root.
+6. Selecting which committed version is the canonical current root is a
+   separate, serialized metadata operation. Publishing a version created from
+   an older branch must be explicit so it cannot silently discard another
+   version's changes.
+7. Page allocation and metadata publication may use short critical sections,
+   but tree traversal and private-version editing should not require a global
+   tree lock.
+8. Pages are reclaimed only after no retained version, active reader, active
+   writer, or fallback metadata slot can reference them.
+
+This is a persistent multiversion tree model, not optimistic conflict
+detection. Versions remain separate unless a future explicit merge operation
+defines how their changes are combined. Keeping versions independent avoids
+ambiguous last-writer-wins behavior, but requires version lifecycle and storage
+retention policies.
+
+Follow-up work:
+
+- Define version handles and their retain/release lifetimes.
+- Track committed roots, active readers, and private writer roots.
+- Allow `Get` and range scans to select an immutable version.
+- Allow writers to fork and modify selected versions concurrently.
+- Define explicit canonical-root publication without automatic retry or merge.
+- Synchronize page allocation, metadata publication, recovery, and `Close`.
+- Delay free-list reuse until no protected version can reach a page.
+- Define retention, pruning, and explicit version-deletion policies.
+- Add race, version-isolation, reclamation, and reader/writer stress tests.
+- Benchmark `sync.Mutex`, `sync.RWMutex`, and snapshot-based reads before
+  selecting the final implementation.
+
 ### Complete recovery validation
 
 - Decode the selected root page when opening the database.
