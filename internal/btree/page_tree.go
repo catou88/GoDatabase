@@ -104,6 +104,186 @@ func (tree *pageTree) insert(key, value []byte) error {
 	return nil
 }
 
+func (tree *pageTree) delete(key []byte) (bool, error) {
+	if len(key) == 0 {
+		return false, fmt.Errorf("key is empty")
+	}
+	if len(key) > maxKeySize {
+		return false, fmt.Errorf("key exceeds max size")
+	}
+	if tree.root == 0 {
+		return false, nil
+	}
+	if err := tree.validateCallbacks(); err != nil {
+		return false, err
+	}
+
+	oldRootID := tree.root
+	oldRoot := tree.get(oldRootID)
+	if err := validateBNode(oldRoot); err != nil {
+		return false, fmt.Errorf("read root page: %w", err)
+	}
+
+	obsolete := make([]uint64, 0, 4)
+	updatedRoot, deleted, err := tree.deleteNode(oldRoot, key, &obsolete)
+	if err != nil || !deleted {
+		return deleted, err
+	}
+	obsolete = append(obsolete, oldRootID)
+
+	switch {
+	case updatedRoot.btype() == nodeTypeLeaf && updatedRoot.nkeys() == 1:
+		tree.root = 0
+	case updatedRoot.btype() == nodeTypeInternal && updatedRoot.nkeys() == 0:
+		tree.root = 0
+	case updatedRoot.btype() == nodeTypeInternal && updatedRoot.nkeys() == 1:
+		tree.root = updatedRoot.getPtr(0)
+	default:
+		tree.root = tree.new(updatedRoot)
+	}
+	for _, pageID := range obsolete {
+		tree.del(pageID)
+	}
+	return true, nil
+}
+
+func (tree *pageTree) deleteNode(
+	node BNode,
+	key []byte,
+	obsolete *[]uint64,
+) (BNode, bool, error) {
+	idx, err := nodeLookupLE(node, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if node.btype() == nodeTypeLeaf {
+		if !bytes.Equal(node.getKey(idx), key) {
+			return node, false, nil
+		}
+		updated, err := leafDeleteEncoded(node, idx)
+		return updated, true, err
+	}
+
+	childPageID := node.getPtr(idx)
+	child := tree.get(childPageID)
+	if err := validateBNode(child); err != nil {
+		return nil, false, fmt.Errorf("read child page %d: %w", childPageID, err)
+	}
+	updatedChild, deleted, err := tree.deleteNode(child, key, obsolete)
+	if err != nil || !deleted {
+		return node, deleted, err
+	}
+	*obsolete = append(*obsolete, childPageID)
+
+	if updatedChild.nkeys() == 0 || int(updatedChild.nbytes()) <= pageSize/4 {
+		if idx > 0 {
+			leftID := node.getPtr(idx - 1)
+			left := tree.get(leftID)
+			if merged, ok, err := mergeEncodedNodes(left, updatedChild); err != nil {
+				return nil, false, err
+			} else if ok {
+				*obsolete = append(*obsolete, leftID)
+				return tree.replaceChildrenAfterDelete(node, idx-1, 2, merged)
+			}
+		}
+		if idx+1 < node.nkeys() {
+			rightID := node.getPtr(idx + 1)
+			right := tree.get(rightID)
+			if merged, ok, err := mergeEncodedNodes(updatedChild, right); err != nil {
+				return nil, false, err
+			} else if ok {
+				*obsolete = append(*obsolete, rightID)
+				return tree.replaceChildrenAfterDelete(node, idx, 2, merged)
+			}
+		}
+	}
+
+	if updatedChild.nkeys() == 0 {
+		return removeChildEncoded(node, idx)
+	}
+	return tree.replaceChildrenAfterDelete(node, idx, 1, updatedChild)
+}
+
+func (tree *pageTree) replaceChildrenAfterDelete(
+	parent BNode,
+	idx, removeCount uint16,
+	child BNode,
+) (BNode, bool, error) {
+	updatedCount := parent.nkeys() - removeCount + 1
+	updated := BNode(make([]byte, pageSize))
+	updated.setHeader(nodeTypeInternal, updatedCount)
+	if err := nodeAppendRange(updated, parent, 0, 0, idx); err != nil {
+		return nil, false, err
+	}
+	childPageID := tree.new(child)
+	if err := nodeAppendKV(updated, idx, childPageID, child.getKey(0), nil); err != nil {
+		return nil, false, err
+	}
+	tailStart := idx + removeCount
+	if err := nodeAppendRange(
+		updated,
+		parent,
+		idx+1,
+		tailStart,
+		parent.nkeys()-tailStart,
+	); err != nil {
+		return nil, false, err
+	}
+	return updated, true, nil
+}
+
+func removeChildEncoded(parent BNode, idx uint16) (BNode, bool, error) {
+	updated := BNode(make([]byte, pageSize))
+	updated.setHeader(nodeTypeInternal, parent.nkeys()-1)
+	if err := nodeAppendRange(updated, parent, 0, 0, idx); err != nil {
+		return nil, false, err
+	}
+	if err := nodeAppendRange(
+		updated,
+		parent,
+		idx,
+		idx+1,
+		parent.nkeys()-idx-1,
+	); err != nil {
+		return nil, false, err
+	}
+	return updated, true, nil
+}
+
+func leafDeleteEncoded(old BNode, idx uint16) (BNode, error) {
+	updated := BNode(make([]byte, pageSize))
+	updated.setHeader(nodeTypeLeaf, old.nkeys()-1)
+	if err := nodeAppendRange(updated, old, 0, 0, idx); err != nil {
+		return nil, err
+	}
+	if err := nodeAppendRange(updated, old, idx, idx+1, old.nkeys()-idx-1); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func mergeEncodedNodes(left, right BNode) (BNode, bool, error) {
+	if left.btype() != right.btype() {
+		return nil, false, fmt.Errorf("cannot merge different node types")
+	}
+	keyCount := left.nkeys() + right.nkeys()
+	recordBytes := int(left.getOffset(left.nkeys())) + int(right.getOffset(right.nkeys()))
+	mergedSize := pageHeaderSize + int(keyCount)*(pagePtrSize+pageOffsetSize) + recordBytes
+	if mergedSize > pageSize {
+		return nil, false, nil
+	}
+
+	merged := BNode(make([]byte, pageSize))
+	merged.setHeader(left.btype(), keyCount)
+	if err := nodeAppendRange(merged, left, 0, 0, left.nkeys()); err != nil {
+		return nil, false, err
+	}
+	if err := nodeAppendRange(merged, right, left.nkeys(), 0, right.nkeys()); err != nil {
+		return nil, false, err
+	}
+	return merged, true, nil
+}
+
 func (tree *pageTree) insertNode(node BNode, key, value []byte, obsolete *[]uint64) (BNode, error) {
 	idx, err := nodeLookupLE(node, key)
 	if err != nil {
