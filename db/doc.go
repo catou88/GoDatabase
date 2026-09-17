@@ -1,8 +1,11 @@
-// Package db provides a minimal in-memory key-value database.
+// Package db provides in-memory and durable key-value databases.
 //
 // A Database stores string keys and string values. Keys are unique, Set
-// overwrites existing values, and Get reports whether a key exists.
+// overwrites existing values, and Get reports whether a key exists. New creates
+// an in-memory database, while Open opens or creates a page-backed database whose
+// contents survive Close and Open.
 //
 // Range queries use inclusive string bounds and return results sorted by key in
-// ascending order.
+// ascending order. A Database opened from a path owns its file handle and should
+// be closed by its caller.
 package db
