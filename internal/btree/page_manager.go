@@ -14,24 +14,30 @@ const (
 	metadataSlotCount = 2
 	metadataSize      = metadataSlotCount * pageSize
 	metadataMagic     = "GDBM"
-	metadataVersion   = 2
+	metadataVersion   = 3
 
 	metadataMagicOffset        = 0
 	metadataVersionOffset      = 4
 	metadataGenerationOffset   = 8
 	metadataRootPageOffset     = 16
 	metadataPageCountOffset    = 24
-	metadataFreeCountOffset    = 32
-	metadataRetiredCountOffset = 34
-	metadataChecksumOffset     = 36
-	metadataPageIDsOffset      = 40
-	metadataMaxPageIDs         = (pageSize - metadataPageIDsOffset) / 8
+	metadataFreeListHeadOffset = 32
+	metadataFreeListTailOffset = 40
+	metadataHeadSequenceOffset = 48
+	metadataTailSequenceOffset = 56
+	metadataMaxSequenceOffset  = 64
+	metadataChecksumOffset     = 72
+
+	legacyFreeCountOffset    = 32
+	legacyRetiredCountOffset = 34
+	legacyChecksumOffset     = 36
+	legacyPageIDsOffset      = 40
+	legacyMaxPageIDs         = (pageSize - legacyPageIDsOffset) / 8
 )
 
 var (
 	errInvalidPageID   = errors.New("invalid page id")
 	errInvalidPageData = errors.New("invalid page data")
-	errFreeListFull    = errors.New("free list exceeds metadata capacity")
 )
 
 type pageManager struct {
@@ -43,6 +49,7 @@ type pageManager struct {
 	retiredPageIDs     []uint64
 	pendingFreePageIDs []uint64
 	freePageSet        map[uint64]struct{}
+	freeListPageIDs    []uint64
 }
 
 func openPageManager(path string) (*pageManager, error) {
@@ -92,13 +99,14 @@ func openPageManager(path string) (*pageManager, error) {
 	}
 
 	return &pageManager{
-		file:           file,
-		nextPageID:     nextPageID,
-		rootPageID:     metadata.rootPageID,
-		generation:     metadata.generation,
-		freePageIDs:    metadata.freePageIDs,
-		retiredPageIDs: metadata.retiredPageIDs,
-		freePageSet:    freePageSet,
+		file:            file,
+		nextPageID:      nextPageID,
+		rootPageID:      metadata.rootPageID,
+		generation:      metadata.generation,
+		freePageIDs:     metadata.freePageIDs,
+		retiredPageIDs:  metadata.retiredPageIDs,
+		freePageSet:     freePageSet,
+		freeListPageIDs: metadata.freeListPageIDs,
 	}, nil
 }
 
@@ -149,6 +157,9 @@ func (pm *pageManager) reservePage() (uint64, error) {
 func (pm *pageManager) freePage(pageID uint64) error {
 	if err := pm.validateExistingPageID(pageID); err != nil {
 		return err
+	}
+	if containsPageID(pm.freeListPageIDs, pageID) {
+		return fmt.Errorf("%w: page %d stores the active free list", errInvalidPageID, pageID)
 	}
 	if containsPageID(pm.retiredPageIDs, pageID) || containsPageID(pm.pendingFreePageIDs, pageID) {
 		return fmt.Errorf("%w: page %d is already freed", errInvalidPageID, pageID)
@@ -225,26 +236,25 @@ func (pm *pageManager) publishRoot(
 	if rootPageID != 0 && (containsPageID(pm.retiredPageIDs, rootPageID) || containsPageID(pm.pendingFreePageIDs, rootPageID)) {
 		return fmt.Errorf("%w: root page %d is marked obsolete", errInvalidPageID, rootPageID)
 	}
+	if containsPageID(pm.freeListPageIDs, rootPageID) {
+		return fmt.Errorf("%w: root page %d stores the active free list", errInvalidPageID, rootPageID)
+	}
 
 	nextGeneration := pm.generation + 1
 	slot := int(nextGeneration % metadataSlotCount)
-	nextFreePageIDs := append([]uint64(nil), pm.freePageIDs...)
-	nextFreePageIDs = append(nextFreePageIDs, pm.retiredPageIDs...)
-	if len(nextFreePageIDs)+len(pm.pendingFreePageIDs) > metadataMaxPageIDs {
-		return errFreeListFull
+	metadata, err := pm.writeFreeListSnapshot(nextGeneration, rootPageID)
+	if err != nil {
+		return err
 	}
 	if beforeWrite != nil {
 		if err := beforeWrite(); err != nil {
 			return err
 		}
 	}
-	if err := writeRootMetadataSlot(pm.file, slot, rootMetadata{
-		generation:     nextGeneration,
-		rootPageID:     rootPageID,
-		pageCount:      pm.nextPageID - 1,
-		freePageIDs:    nextFreePageIDs,
-		retiredPageIDs: pm.pendingFreePageIDs,
-	}); err != nil {
+	if err := pm.file.Sync(); err != nil {
+		return err
+	}
+	if err := writeRootMetadataSlot(pm.file, slot, metadata); err != nil {
 		return err
 	}
 	if err := syncMetadata(); err != nil {
@@ -253,14 +263,121 @@ func (pm *pageManager) publishRoot(
 
 	pm.rootPageID = rootPageID
 	pm.generation = nextGeneration
-	pm.freePageIDs = nextFreePageIDs
-	pm.retiredPageIDs = append([]uint64(nil), pm.pendingFreePageIDs...)
 	pm.pendingFreePageIDs = nil
 	pm.freePageSet = make(map[uint64]struct{}, len(pm.freePageIDs))
 	for _, pageID := range pm.freePageIDs {
 		pm.freePageSet[pageID] = struct{}{}
 	}
 	return nil
+}
+
+func (pm *pageManager) writeFreeListSnapshot(generation, rootPageID uint64) (rootMetadata, error) {
+	eligible := append([]uint64(nil), pm.freePageIDs...)
+	eligible = append(eligible, pm.retiredPageIDs...)
+	protected := append([]uint64(nil), pm.pendingFreePageIDs...)
+	protected = append(protected, pm.freeListPageIDs...)
+
+	totalEntries := len(eligible) + len(protected)
+	recyclable := make([]uint64, 0)
+	for _, pageID := range eligible {
+		page, err := readRawDataPage(pm.file, pageID)
+		if err == nil {
+			if _, err := decodeFreeListNode(page); err == nil {
+				recyclable = append(recyclable, pageID)
+			}
+		}
+	}
+	nodeCount := 0
+	reusedNodeCount := 0
+	if totalEntries > 0 {
+		maxNodes := (totalEntries + freeListPageCapacity - 1) / freeListPageCapacity
+		for candidate := 1; candidate <= maxNodes; candidate++ {
+			reused := candidate
+			if reused > len(recyclable) {
+				reused = len(recyclable)
+			}
+			needed := (totalEntries - reused + freeListPageCapacity - 1) / freeListPageCapacity
+			if needed == candidate {
+				nodeCount = candidate
+				reusedNodeCount = reused
+				break
+			}
+		}
+		if nodeCount == 0 {
+			nodeCount = maxNodes
+		}
+	}
+
+	nodePageIDs := make([]uint64, nodeCount)
+	for i := range nodePageIDs {
+		if i < reusedNodeCount {
+			last := len(recyclable) - 1
+			nodePageIDs[i] = recyclable[last]
+			recyclable = recyclable[:last]
+			eligible = removePageID(eligible, nodePageIDs[i])
+			delete(pm.freePageSet, nodePageIDs[i])
+			continue
+		}
+		pageID := pm.nextPageID
+		if _, err := dataPageOffset(pageID); err != nil {
+			return rootMetadata{}, err
+		}
+		pm.nextPageID++
+		nodePageIDs[i] = pageID
+	}
+
+	entries := append(append([]uint64(nil), eligible...), protected...)
+	for i, pageID := range nodePageIDs {
+		start := i * freeListPageCapacity
+		end := start + freeListPageCapacity
+		if end > len(entries) {
+			end = len(entries)
+		}
+		nextPageID := uint64(0)
+		if i+1 < len(nodePageIDs) {
+			nextPageID = nodePageIDs[i+1]
+		}
+		page, err := encodeFreeListNode(freeListNode{
+			nextPageID: nextPageID,
+			sequence:   uint64(start),
+			pageIDs:    entries[start:end],
+		})
+		if err != nil {
+			return rootMetadata{}, err
+		}
+		if err := pm.writePage(pageID, page); err != nil {
+			return rootMetadata{}, err
+		}
+	}
+
+	pm.freePageIDs = eligible
+	pm.retiredPageIDs = protected
+	pm.freeListPageIDs = nodePageIDs
+	metadata := rootMetadata{
+		generation:      generation,
+		rootPageID:      rootPageID,
+		pageCount:       pm.nextPageID - 1,
+		headSequence:    0,
+		tailSequence:    uint64(len(entries)),
+		maxSequence:     uint64(len(eligible)),
+		freePageIDs:     append([]uint64(nil), eligible...),
+		retiredPageIDs:  append([]uint64(nil), protected...),
+		freeListPageIDs: append([]uint64(nil), nodePageIDs...),
+	}
+	if len(nodePageIDs) > 0 {
+		metadata.freeListHeadPageID = nodePageIDs[0]
+		metadata.freeListTailPageID = nodePageIDs[len(nodePageIDs)-1]
+	}
+	return metadata, nil
+}
+
+func removePageID(pageIDs []uint64, target uint64) []uint64 {
+	for i, pageID := range pageIDs {
+		if pageID == target {
+			return append(pageIDs[:i], pageIDs[i+1:]...)
+		}
+	}
+	return pageIDs
 }
 
 type pageManagerState struct {
@@ -270,6 +387,7 @@ type pageManagerState struct {
 	freePageIDs        []uint64
 	retiredPageIDs     []uint64
 	pendingFreePageIDs []uint64
+	freeListPageIDs    []uint64
 }
 
 func (pm *pageManager) snapshot() pageManagerState {
@@ -280,6 +398,7 @@ func (pm *pageManager) snapshot() pageManagerState {
 		freePageIDs:        append([]uint64(nil), pm.freePageIDs...),
 		retiredPageIDs:     append([]uint64(nil), pm.retiredPageIDs...),
 		pendingFreePageIDs: append([]uint64(nil), pm.pendingFreePageIDs...),
+		freeListPageIDs:    append([]uint64(nil), pm.freeListPageIDs...),
 	}
 }
 
@@ -290,6 +409,7 @@ func (pm *pageManager) restore(state pageManagerState) {
 	pm.freePageIDs = append([]uint64(nil), state.freePageIDs...)
 	pm.retiredPageIDs = append([]uint64(nil), state.retiredPageIDs...)
 	pm.pendingFreePageIDs = append([]uint64(nil), state.pendingFreePageIDs...)
+	pm.freeListPageIDs = append([]uint64(nil), state.freeListPageIDs...)
 	pm.freePageSet = make(map[uint64]struct{}, len(pm.freePageIDs))
 	for _, pageID := range pm.freePageIDs {
 		pm.freePageSet[pageID] = struct{}{}
@@ -326,11 +446,17 @@ func dataPageOffset(pageID uint64) (int64, error) {
 }
 
 type rootMetadata struct {
-	generation     uint64
-	rootPageID     uint64
-	pageCount      uint64
-	freePageIDs    []uint64
-	retiredPageIDs []uint64
+	generation         uint64
+	rootPageID         uint64
+	pageCount          uint64
+	freeListHeadPageID uint64
+	freeListTailPageID uint64
+	headSequence       uint64
+	tailSequence       uint64
+	maxSequence        uint64
+	freePageIDs        []uint64
+	retiredPageIDs     []uint64
+	freeListPageIDs    []uint64
 }
 
 func readRootMetadata(file *os.File) (rootMetadata, error) {
@@ -368,7 +494,7 @@ func readRootMetadataSlot(file *os.File, slot int) (rootMetadata, error) {
 		return rootMetadata{}, errInvalidPageData
 	}
 	version := binary.LittleEndian.Uint16(page[metadataVersionOffset:])
-	if version != 1 && version != metadataVersion {
+	if version != 1 && version != 2 && version != metadataVersion {
 		return rootMetadata{}, errInvalidPageData
 	}
 
@@ -379,8 +505,12 @@ func readRootMetadataSlot(file *os.File, slot int) (rootMetadata, error) {
 			return rootMetadata{}, errInvalidPageData
 		}
 	} else {
-		wantChecksum := binary.LittleEndian.Uint32(page[metadataChecksumOffset:])
-		binary.LittleEndian.PutUint32(page[metadataChecksumOffset:], 0)
+		checksumOffset := metadataChecksumOffset
+		if version == 2 {
+			checksumOffset = legacyChecksumOffset
+		}
+		wantChecksum := binary.LittleEndian.Uint32(page[checksumOffset:])
+		binary.LittleEndian.PutUint32(page[checksumOffset:], 0)
 		if gotChecksum := crc32.ChecksumIEEE(page); gotChecksum != wantChecksum {
 			return rootMetadata{}, errInvalidPageData
 		}
@@ -394,15 +524,16 @@ func readRootMetadataSlot(file *os.File, slot int) (rootMetadata, error) {
 	if metadata.rootPageID > metadata.pageCount {
 		return rootMetadata{}, errInvalidPageData
 	}
-	if version == metadataVersion {
-		freeCount := int(binary.LittleEndian.Uint16(page[metadataFreeCountOffset:]))
-		retiredCount := int(binary.LittleEndian.Uint16(page[metadataRetiredCountOffset:]))
-		if freeCount+retiredCount > metadataMaxPageIDs {
+	switch version {
+	case 2:
+		freeCount := int(binary.LittleEndian.Uint16(page[legacyFreeCountOffset:]))
+		retiredCount := int(binary.LittleEndian.Uint16(page[legacyRetiredCountOffset:]))
+		if freeCount+retiredCount > legacyMaxPageIDs {
 			return rootMetadata{}, errInvalidPageData
 		}
 		seen := make(map[uint64]struct{}, freeCount+retiredCount)
 		for i := 0; i < freeCount+retiredCount; i++ {
-			pos := metadataPageIDsOffset + i*8
+			pos := legacyPageIDsOffset + i*8
 			pageID := binary.LittleEndian.Uint64(page[pos:])
 			if pageID == 0 || pageID > metadata.pageCount || pageID == metadata.rootPageID {
 				return rootMetadata{}, errInvalidPageData
@@ -417,26 +548,31 @@ func readRootMetadataSlot(file *os.File, slot int) (rootMetadata, error) {
 				metadata.retiredPageIDs = append(metadata.retiredPageIDs, pageID)
 			}
 		}
+	case metadataVersion:
+		metadata.freeListHeadPageID = binary.LittleEndian.Uint64(page[metadataFreeListHeadOffset:])
+		metadata.freeListTailPageID = binary.LittleEndian.Uint64(page[metadataFreeListTailOffset:])
+		metadata.headSequence = binary.LittleEndian.Uint64(page[metadataHeadSequenceOffset:])
+		metadata.tailSequence = binary.LittleEndian.Uint64(page[metadataTailSequenceOffset:])
+		metadata.maxSequence = binary.LittleEndian.Uint64(page[metadataMaxSequenceOffset:])
+		if err := loadFreeListMetadata(file, &metadata); err != nil {
+			return rootMetadata{}, err
+		}
 	}
 	return metadata, nil
 }
 
 func writeRootMetadataSlot(file *os.File, slot int, metadata rootMetadata) error {
-	if len(metadata.freePageIDs)+len(metadata.retiredPageIDs) > metadataMaxPageIDs {
-		return errFreeListFull
-	}
 	page := make([]byte, pageSize)
 	copy(page[metadataMagicOffset:metadataVersionOffset], metadataMagic)
 	binary.LittleEndian.PutUint16(page[metadataVersionOffset:], metadataVersion)
 	binary.LittleEndian.PutUint64(page[metadataGenerationOffset:], metadata.generation)
 	binary.LittleEndian.PutUint64(page[metadataRootPageOffset:], metadata.rootPageID)
 	binary.LittleEndian.PutUint64(page[metadataPageCountOffset:], metadata.pageCount)
-	binary.LittleEndian.PutUint16(page[metadataFreeCountOffset:], uint16(len(metadata.freePageIDs)))
-	binary.LittleEndian.PutUint16(page[metadataRetiredCountOffset:], uint16(len(metadata.retiredPageIDs)))
-	pageIDs := append(append([]uint64(nil), metadata.freePageIDs...), metadata.retiredPageIDs...)
-	for i, pageID := range pageIDs {
-		binary.LittleEndian.PutUint64(page[metadataPageIDsOffset+i*8:], pageID)
-	}
+	binary.LittleEndian.PutUint64(page[metadataFreeListHeadOffset:], metadata.freeListHeadPageID)
+	binary.LittleEndian.PutUint64(page[metadataFreeListTailOffset:], metadata.freeListTailPageID)
+	binary.LittleEndian.PutUint64(page[metadataHeadSequenceOffset:], metadata.headSequence)
+	binary.LittleEndian.PutUint64(page[metadataTailSequenceOffset:], metadata.tailSequence)
+	binary.LittleEndian.PutUint64(page[metadataMaxSequenceOffset:], metadata.maxSequence)
 	checksum := crc32.ChecksumIEEE(page)
 	binary.LittleEndian.PutUint32(page[metadataChecksumOffset:], checksum)
 
@@ -446,6 +582,74 @@ func writeRootMetadataSlot(file *os.File, slot int, metadata rootMetadata) error
 	}
 	if n != pageSize {
 		return io.ErrShortWrite
+	}
+	return nil
+}
+
+func loadFreeListMetadata(file *os.File, metadata *rootMetadata) error {
+	if metadata.freeListHeadPageID == 0 {
+		if metadata.freeListTailPageID != 0 || metadata.headSequence != 0 ||
+			metadata.tailSequence != 0 || metadata.maxSequence != 0 {
+			return errInvalidPageData
+		}
+		return nil
+	}
+	if metadata.freeListTailPageID == 0 || metadata.headSequence > metadata.maxSequence ||
+		metadata.maxSequence > metadata.tailSequence {
+		return errInvalidPageData
+	}
+
+	seenPages := make(map[uint64]struct{})
+	seenEntries := make(map[uint64]struct{})
+	pageID := metadata.freeListHeadPageID
+	expectedSequence := metadata.headSequence
+	for pageID != 0 {
+		if pageID > metadata.pageCount || pageID == metadata.rootPageID {
+			return errInvalidPageData
+		}
+		if _, duplicate := seenPages[pageID]; duplicate {
+			return errInvalidPageData
+		}
+		seenPages[pageID] = struct{}{}
+		page, err := readRawDataPage(file, pageID)
+		if err != nil {
+			return err
+		}
+		node, err := decodeFreeListNode(page)
+		if err != nil || node.sequence != expectedSequence {
+			return errInvalidPageData
+		}
+		metadata.freeListPageIDs = append(metadata.freeListPageIDs, pageID)
+		for _, entryID := range node.pageIDs {
+			if entryID > metadata.pageCount || entryID == metadata.rootPageID {
+				return errInvalidPageData
+			}
+			if _, duplicate := seenPages[entryID]; duplicate {
+				return errInvalidPageData
+			}
+			if _, duplicate := seenEntries[entryID]; duplicate {
+				return errInvalidPageData
+			}
+			seenEntries[entryID] = struct{}{}
+			if expectedSequence < metadata.maxSequence {
+				metadata.freePageIDs = append(metadata.freePageIDs, entryID)
+			} else {
+				metadata.retiredPageIDs = append(metadata.retiredPageIDs, entryID)
+			}
+			expectedSequence++
+		}
+		if node.nextPageID == 0 && pageID != metadata.freeListTailPageID {
+			return errInvalidPageData
+		}
+		pageID = node.nextPageID
+	}
+	if expectedSequence != metadata.tailSequence {
+		return errInvalidPageData
+	}
+	for listPageID := range seenPages {
+		if _, alsoFree := seenEntries[listPageID]; alsoFree {
+			return errInvalidPageData
+		}
 	}
 	return nil
 }
