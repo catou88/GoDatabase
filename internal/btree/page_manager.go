@@ -78,7 +78,7 @@ func openPageManager(path string) (*pageManager, error) {
 		return nil, err
 	}
 	nextPageID := uint64((info.Size()-metadataSize)/pageSize) + 1
-	if metadata.rootPageID >= nextPageID {
+	if metadata.rootPageID != 0 && metadata.rootPageID >= nextPageID {
 		_ = file.Close()
 		return nil, fmt.Errorf("%w: root page %d is not allocated", errInvalidPageID, metadata.rootPageID)
 	}
@@ -107,31 +107,42 @@ func (pm *pageManager) close() error {
 }
 
 func (pm *pageManager) allocatePage() (uint64, error) {
-	pageID := pm.nextPageID
-	reusing := len(pm.freePageIDs) > 0
-	if reusing {
-		pageID = pm.freePageIDs[len(pm.freePageIDs)-1]
+	state := pm.snapshot()
+	pageID, err := pm.reservePage()
+	if err != nil {
+		return 0, err
 	}
 	offset, err := dataPageOffset(pageID)
 	if err != nil {
+		pm.restore(state)
 		return 0, err
 	}
 
 	blankPage := make([]byte, pageSize)
 	n, err := pm.file.WriteAt(blankPage, offset)
 	if err != nil {
+		pm.restore(state)
 		return 0, err
 	}
 	if n != pageSize {
+		pm.restore(state)
 		return 0, io.ErrShortWrite
 	}
+	return pageID, nil
+}
 
-	if reusing {
+func (pm *pageManager) reservePage() (uint64, error) {
+	if len(pm.freePageIDs) > 0 {
+		pageID := pm.freePageIDs[len(pm.freePageIDs)-1]
 		pm.freePageIDs = pm.freePageIDs[:len(pm.freePageIDs)-1]
 		delete(pm.freePageSet, pageID)
-	} else {
-		pm.nextPageID++
+		return pageID, nil
 	}
+	pageID := pm.nextPageID
+	if _, err := dataPageOffset(pageID); err != nil {
+		return 0, err
+	}
+	pm.nextPageID++
 	return pageID, nil
 }
 
@@ -195,14 +206,24 @@ func (pm *pageManager) rootPage() uint64 {
 }
 
 func (pm *pageManager) commitRoot(rootPageID uint64) error {
-	if err := pm.validateExistingPageID(rootPageID); err != nil {
-		return err
-	}
-	if containsPageID(pm.retiredPageIDs, rootPageID) || containsPageID(pm.pendingFreePageIDs, rootPageID) {
-		return fmt.Errorf("%w: root page %d is marked obsolete", errInvalidPageID, rootPageID)
-	}
 	if err := pm.file.Sync(); err != nil {
 		return err
+	}
+	return pm.publishRoot(rootPageID, nil, pm.file.Sync)
+}
+
+func (pm *pageManager) publishRoot(
+	rootPageID uint64,
+	beforeWrite func() error,
+	syncMetadata func() error,
+) error {
+	if rootPageID != 0 {
+		if err := pm.validateExistingPageID(rootPageID); err != nil {
+			return err
+		}
+	}
+	if rootPageID != 0 && (containsPageID(pm.retiredPageIDs, rootPageID) || containsPageID(pm.pendingFreePageIDs, rootPageID)) {
+		return fmt.Errorf("%w: root page %d is marked obsolete", errInvalidPageID, rootPageID)
 	}
 
 	nextGeneration := pm.generation + 1
@@ -211,6 +232,11 @@ func (pm *pageManager) commitRoot(rootPageID uint64) error {
 	nextFreePageIDs = append(nextFreePageIDs, pm.retiredPageIDs...)
 	if len(nextFreePageIDs)+len(pm.pendingFreePageIDs) > metadataMaxPageIDs {
 		return errFreeListFull
+	}
+	if beforeWrite != nil {
+		if err := beforeWrite(); err != nil {
+			return err
+		}
 	}
 	if err := writeRootMetadataSlot(pm.file, slot, rootMetadata{
 		generation:     nextGeneration,
@@ -221,7 +247,7 @@ func (pm *pageManager) commitRoot(rootPageID uint64) error {
 	}); err != nil {
 		return err
 	}
-	if err := pm.file.Sync(); err != nil {
+	if err := syncMetadata(); err != nil {
 		return err
 	}
 
@@ -235,6 +261,39 @@ func (pm *pageManager) commitRoot(rootPageID uint64) error {
 		pm.freePageSet[pageID] = struct{}{}
 	}
 	return nil
+}
+
+type pageManagerState struct {
+	nextPageID         uint64
+	rootPageID         uint64
+	generation         uint64
+	freePageIDs        []uint64
+	retiredPageIDs     []uint64
+	pendingFreePageIDs []uint64
+}
+
+func (pm *pageManager) snapshot() pageManagerState {
+	return pageManagerState{
+		nextPageID:         pm.nextPageID,
+		rootPageID:         pm.rootPageID,
+		generation:         pm.generation,
+		freePageIDs:        append([]uint64(nil), pm.freePageIDs...),
+		retiredPageIDs:     append([]uint64(nil), pm.retiredPageIDs...),
+		pendingFreePageIDs: append([]uint64(nil), pm.pendingFreePageIDs...),
+	}
+}
+
+func (pm *pageManager) restore(state pageManagerState) {
+	pm.nextPageID = state.nextPageID
+	pm.rootPageID = state.rootPageID
+	pm.generation = state.generation
+	pm.freePageIDs = append([]uint64(nil), state.freePageIDs...)
+	pm.retiredPageIDs = append([]uint64(nil), state.retiredPageIDs...)
+	pm.pendingFreePageIDs = append([]uint64(nil), state.pendingFreePageIDs...)
+	pm.freePageSet = make(map[uint64]struct{}, len(pm.freePageIDs))
+	for _, pageID := range pm.freePageIDs {
+		pm.freePageSet[pageID] = struct{}{}
+	}
 }
 
 func (pm *pageManager) validateExistingPageID(pageID uint64) error {
@@ -332,7 +391,7 @@ func readRootMetadataSlot(file *os.File, slot int) (rootMetadata, error) {
 		rootPageID: binary.LittleEndian.Uint64(page[metadataRootPageOffset:]),
 		pageCount:  binary.LittleEndian.Uint64(page[metadataPageCountOffset:]),
 	}
-	if metadata.rootPageID == 0 || metadata.rootPageID > metadata.pageCount {
+	if metadata.rootPageID > metadata.pageCount {
 		return rootMetadata{}, errInvalidPageData
 	}
 	if version == metadataVersion {
