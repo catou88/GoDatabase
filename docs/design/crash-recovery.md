@@ -147,6 +147,51 @@ If metadata exists but no valid root can be recovered, opening the database
 should fail with a clear corruption error instead of silently returning an empty
 database.
 
+## Future Write-Latency Improvements
+
+The current commit protocol favors simple durability over latency. Every
+successful mutation writes copy-on-write pages, synchronizes those pages,
+publishes a new metadata generation, and synchronizes metadata before returning.
+The synchronization barriers are expected to dominate `Set` and `Delete`
+latency.
+
+Future optimization should preserve the existing durability guarantee unless a
+caller explicitly selects a weaker mode. Candidate improvements, in preferred
+evaluation order, are:
+
+1. **Measure the commit path.** Record page-encoding time, pages and bytes
+   written, data-sync time, metadata-sync time, and total commit latency. Report
+   latency distributions in addition to benchmark averages.
+2. **Add multi-operation transactions.** Build one private copy-on-write tree
+   version for several operations and publish it with one durability sequence.
+   This amortizes page and synchronization costs without weakening durability.
+3. **Add group commit.** Allow independently prepared commits to share a
+   synchronization barrier. Each writer must be acknowledged only after the
+   metadata generation containing its commit is durable.
+4. **Evaluate a one-sync copy-on-write commit.** Write new pages and the
+   alternate metadata slot, then synchronize once. This is acceptable only if
+   deterministic fault-injection tests prove that recovery rejects incomplete
+   new trees and always falls back to the previous valid generation after an
+   interrupted synchronization.
+5. **Reduce write amplification.** A normal update should rewrite only the
+   root-to-leaf path plus pages required by a split or merge. Track pages written
+   per operation and remove unnecessary page copies, encoding, and allocations.
+6. **Offer explicit durability policies.** A fully synchronous mode remains the
+   default. Optional batch, asynchronous, or caller-controlled synchronization
+   modes must document their possible data-loss windows and use distinct
+   benchmarks. Buffered and durable writes are not equivalent measurements.
+7. **Consider a write-ahead log for transactions.** A compact sequential WAL
+   can place one log synchronization on the critical path while tree pages are
+   checkpointed later. It is justified only when transaction or recovery
+   requirements outweigh the added replay, checksum, checkpoint, truncation,
+   and log-growth complexity.
+
+Removing synchronization merely to improve benchmark results is not an
+optimization of the durable operation; it defines a different durability
+contract. Any protocol change must retain alternate metadata generations until
+the new tree is fully validated and must include crash tests at every write and
+synchronization boundary.
+
 ## Known Limitations
 
 The first recovery design intentionally does not provide:
