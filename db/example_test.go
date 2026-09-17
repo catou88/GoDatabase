@@ -13,13 +13,21 @@ func ExampleOpen() {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(directory)
+	defer func() {
+		if err := os.RemoveAll(directory); err != nil {
+			panic(err)
+		}
+	}()
 
 	database, err := db.Open(filepath.Join(directory, "example.db"))
 	if err != nil {
 		panic(err)
 	}
-	defer database.Close()
+	defer func() {
+		if err := database.Close(); err != nil {
+			panic(err)
+		}
+	}()
 
 	if err := database.Set("language", "Go"); err != nil {
 		panic(err)
