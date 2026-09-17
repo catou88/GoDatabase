@@ -159,7 +159,7 @@ For each leaf node:
 This preserves the public `Get` behavior:
 
 ```go
-value, ok := db.Get(key)
+value, ok, err := db.Get(key)
 ```
 
 ## In-Memory Tree Structure

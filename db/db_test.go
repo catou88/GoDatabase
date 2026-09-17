@@ -35,7 +35,10 @@ func TestDatabaseSetAndGet(t *testing.T) {
 				t.Fatalf("Set returned error: %v", err)
 			}
 
-			value, ok := db.Get(tt.key)
+			value, ok, err := db.Get(tt.key)
+			if err != nil {
+				t.Fatalf("Get returned error: %v", err)
+			}
 			if !ok {
 				t.Fatalf("expected %q to exist", tt.key)
 			}
@@ -89,7 +92,10 @@ func TestDatabaseOverwrite(t *testing.T) {
 				t.Fatalf("overwrite Set returned error: %v", err)
 			}
 
-			value, ok := db.Get(tt.key)
+			value, ok, err := db.Get(tt.key)
+			if err != nil {
+				t.Fatalf("Get returned error: %v", err)
+			}
 			if !ok {
 				t.Fatalf("expected %q to exist after overwrite", tt.key)
 			}
@@ -140,12 +146,18 @@ func TestDatabaseDelete(t *testing.T) {
 				}
 			}
 
-			deleted := db.Delete(tt.key)
+			deleted, err := db.Delete(tt.key)
+			if err != nil {
+				t.Fatalf("Delete returned error: %v", err)
+			}
 			if deleted != tt.wantDelete {
 				t.Fatalf("expected Delete(%q) to return %v, got %v", tt.key, tt.wantDelete, deleted)
 			}
 
-			_, ok := db.Get(tt.key)
+			_, ok, err := db.Get(tt.key)
+			if err != nil {
+				t.Fatalf("Get returned error: %v", err)
+			}
 			if ok != tt.wantExists {
 				t.Fatalf("expected Get(%q) existence to be %v, got %v", tt.key, tt.wantExists, ok)
 			}
@@ -160,7 +172,10 @@ func TestDatabaseGetMissingKey(t *testing.T) {
 		t.Fatalf("Set returned error: %v", err)
 	}
 
-	value, ok := db.Get("missing")
+	value, ok, err := db.Get("missing")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
 	if ok {
 		t.Fatalf("expected missing key to not exist, got value %q", value)
 	}
@@ -254,7 +269,10 @@ func TestDatabaseRange(t *testing.T) {
 				}
 			}
 
-			got := db.Range(tt.start, tt.end)
+			got, err := db.Range(tt.start, tt.end)
+			if err != nil {
+				t.Fatalf("Range returned error: %v", err)
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Range(%q, %q) = %#v, want %#v", tt.start, tt.end, got, tt.want)
 			}
