@@ -15,7 +15,7 @@ var (
 
 var benchmarkDatasetSizes = []int{10, 1_000, 100_000}
 
-func BenchmarkDatabaseSet(b *testing.B) {
+func BenchmarkInMemorySet(b *testing.B) {
 	for _, size := range benchmarkDatasetSizes {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			database, keys := newBenchmarkDatabase(b, size)
@@ -31,7 +31,7 @@ func BenchmarkDatabaseSet(b *testing.B) {
 	}
 }
 
-func BenchmarkDatabaseGet(b *testing.B) {
+func BenchmarkInMemoryGet(b *testing.B) {
 	for _, size := range benchmarkDatasetSizes {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			database, keys := newBenchmarkDatabase(b, size)
@@ -53,7 +53,7 @@ func BenchmarkDatabaseGet(b *testing.B) {
 	}
 }
 
-func BenchmarkDatabaseDelete(b *testing.B) {
+func BenchmarkInMemoryDelete(b *testing.B) {
 	const minimumBatchSize = 8_192
 
 	for _, size := range benchmarkDatasetSizes {
@@ -93,7 +93,7 @@ func BenchmarkDatabaseDelete(b *testing.B) {
 	}
 }
 
-func BenchmarkDatabaseRange(b *testing.B) {
+func BenchmarkInMemoryRange(b *testing.B) {
 	for _, size := range benchmarkDatasetSizes {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			database, keys := newBenchmarkDatabase(b, size)
