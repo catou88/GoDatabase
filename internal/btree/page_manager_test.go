@@ -491,6 +491,104 @@ func TestPageManagerRejectsDuplicateFree(t *testing.T) {
 	}
 }
 
+func TestPageManagerPersistsFreeListBeyondMetadataCapacity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pages.db")
+	pm, err := openPageManager(path)
+	if err != nil {
+		t.Fatalf("openPageManager() error = %v", err)
+	}
+	root := mustWritePageNode(t, pm, &pageNode{
+		leaf: true, keys: []string{"", "root"}, values: []string{"", "live"},
+	})
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(initial) error = %v", err)
+	}
+
+	const freeCount = legacyMaxPageIDs + 100
+	freed := make([]uint64, freeCount)
+	for i := range freed {
+		freed[i], err = pm.allocatePage()
+		if err != nil {
+			t.Fatalf("allocatePage(%d) error = %v", i, err)
+		}
+		if err := pm.freePage(freed[i]); err != nil {
+			t.Fatalf("freePage(%d) error = %v", i, err)
+		}
+	}
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(protected) error = %v", err)
+	}
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(reusable) error = %v", err)
+	}
+	if len(pm.freeListPageIDs) < 2 {
+		t.Fatalf("free-list page count = %d, want at least 2", len(pm.freeListPageIDs))
+	}
+	if err := pm.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+
+	pm, err = openPageManager(path)
+	if err != nil {
+		t.Fatalf("reopen page manager error = %v", err)
+	}
+	defer func() {
+		if err := pm.close(); err != nil {
+			t.Errorf("close reopened manager error = %v", err)
+		}
+	}()
+	if len(pm.freePageIDs) != freeCount {
+		t.Fatalf("reopened reusable page count = %d, want %d", len(pm.freePageIDs), freeCount)
+	}
+	infoBefore, err := pm.file.Stat()
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if _, err := pm.allocatePage(); err != nil {
+		t.Fatalf("allocatePage(reuse) error = %v", err)
+	}
+	infoAfter, err := pm.file.Stat()
+	if err != nil {
+		t.Fatalf("Stat() after reuse error = %v", err)
+	}
+	if infoAfter.Size() != infoBefore.Size() {
+		t.Fatalf("file grew from %d to %d while reusable pages existed", infoBefore.Size(), infoAfter.Size())
+	}
+}
+
+func TestPageManagerRecyclesConsumedFreeListPages(t *testing.T) {
+	pm := newTestPageManager(t)
+	defer func() {
+		if err := pm.close(); err != nil {
+			t.Errorf("close() error = %v", err)
+		}
+	}()
+	root := mustWritePageNode(t, pm, &pageNode{leaf: true, keys: []string{"a"}, values: []string{"live"}})
+	obsolete, err := pm.allocatePage()
+	if err != nil {
+		t.Fatalf("allocate obsolete page: %v", err)
+	}
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(initial) error = %v", err)
+	}
+	if err := pm.freePage(obsolete); err != nil {
+		t.Fatalf("freePage() error = %v", err)
+	}
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(first list) error = %v", err)
+	}
+	firstListPage := pm.freeListPageIDs[0]
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(protect list page) error = %v", err)
+	}
+	if err := pm.commitRoot(root); err != nil {
+		t.Fatalf("commitRoot(recycle list page) error = %v", err)
+	}
+	if !containsPageID(pm.freeListPageIDs, firstListPage) {
+		t.Fatalf("free-list page %d was not recycled into the active list", firstListPage)
+	}
+}
+
 func newTestPageManager(t *testing.T) *pageManager {
 	t.Helper()
 
