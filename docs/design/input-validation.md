@@ -35,7 +35,7 @@ Reason: an empty string is a valid value and is different from a missing key.
 Getting a missing key returns the zero value and `false`.
 
 ```go
-value, ok := db.Get("missing")
+value, ok, err := db.Get("missing")
 ```
 
 Expected behavior:
@@ -43,18 +43,20 @@ Expected behavior:
 ```go
 value == ""
 ok == false
+err == nil
 ```
 
 Deleting a missing key returns `false`.
 
 ```go
-deleted := db.Delete("missing")
+deleted, err := db.Delete("missing")
 ```
 
 Expected behavior:
 
 ```go
 deleted == false
+err == nil
 ```
 
 Reason: this follows common Go map-style behavior and keeps read/delete operations simple.
@@ -103,23 +105,20 @@ means "return keys where `"" <= key <= "c"`." For typical non-empty keys, this r
 
 Reason: overloading empty strings to mean "no bound" creates ambiguity. Open-ended scans should be added later with explicit APIs such as `RangeFrom`, `RangeTo`, or a scan options type.
 
-## Current API Impact
+## API Impact
 
-The current API can enforce empty-key validation in `Set` because it already returns an error:
+All operations return errors so durable databases can report closed handles,
+I/O failures, and corrupt storage without hiding them:
 
 ```go
 func (d *Database) Set(key, value string) error
+func (d *Database) Get(key string) (string, bool, error)
+func (d *Database) Delete(key string) (bool, error)
+func (d *Database) Range(start, end string) ([]Item, error)
 ```
 
-The current `Get`, `Delete`, and `Range` methods do not return errors:
-
-```go
-func (d *Database) Get(key string) (string, bool)
-func (d *Database) Delete(key string) bool
-func (d *Database) Range(start, end string) []Item
-```
-
-For now, avoid changing those method signatures. Signature changes should be handled separately if future storage layers need richer validation or error reporting.
+Missing keys and empty ranges are normal results and return a `nil` error.
+Operations on a closed database return `ErrClosed`.
 
 ## Follow-Up Work
 
