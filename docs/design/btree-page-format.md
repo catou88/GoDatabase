@@ -2,12 +2,8 @@
 
 ## Goal
 
-Define the future on-disk encoding for B+Tree nodes so the storage layer can
-serialize nodes into fixed-size pages without changing the public database API.
-
-This design is for the disk-backed implementation. The current B+Tree remains
-in memory until search, insert, delete, range scan, and invariant checks are
-stable.
+Define the on-disk encoding for byte-backed B+Tree nodes so the storage layer
+can access fixed-size pages without general-purpose serialization.
 
 ## Page Size
 
@@ -94,8 +90,11 @@ Child pointers are encoded as page numbers.
 
 Rules:
 
-- Internal pages store `key_count + 1` child page numbers.
-- Leaf pages store no child page numbers.
+- Every page reserves `key_count` pointer slots so record positions are
+  calculated identically for leaf and internal nodes.
+- Internal pages store one child page number for each key. Each key is the
+  inclusive lower bound of the corresponding child range.
+- Leaf pointer slots are zero and unused.
 - Page number `0` is reserved as invalid or empty.
 - A valid root page number must be nonzero.
 
@@ -111,15 +110,16 @@ Offsets locate each encoded key/value record relative to the start of the
 record area.
 
 ```text
-| offset_0 | offset_1 | ... | offset_key_count |
-|    2B    |    2B    | ... |        2B        |
+| end_offset_0 | end_offset_1 | ... | end_offset_(key_count-1) |
+|      2B      |      2B      | ... |             2B           |
 ```
 
 Rules:
 
-- The offsets array has `key_count + 1` entries.
-- `offset_0` must be `0`.
-- `offset_key_count` is the total byte length of all encoded records.
+- The stored offsets array has `key_count` entries.
+- The start offset of the first record is implicitly `0` and is not stored.
+- Each stored offset points immediately past its corresponding record.
+- The final stored offset is the total byte length of all encoded records.
 - Offsets must be non-decreasing.
 - Every offset must stay within the page.
 
@@ -140,7 +140,9 @@ Each key/value record stores lengths followed by raw bytes.
 
 Rules:
 
-- `key_size` must be greater than `0`.
+- User keys must be non-empty.
+- The first entry may use an empty internal sentinel key representing the
+  lowest possible key. The sentinel is never returned as user data.
 - Leaf pages store both key bytes and value bytes.
 - Internal pages store key bytes and use `value_size = 0`.
 - Keys in a page must be sorted ascending by byte comparison.
@@ -176,7 +178,7 @@ Tests should verify that:
 
 ## Compatibility Assumptions
 
-Version `1` of the page format assumes:
+Version `2` of the page format assumes:
 
 - The database file is read and written by GoDatabase.
 - Integers are always encoded little-endian.
@@ -185,6 +187,8 @@ Version `1` of the page format assumes:
 - Keys are compared lexicographically by encoded bytes.
 - Leaf values are opaque bytes to the page layer.
 - Internal values are always empty.
+- Internal pages contain the same number of keys and child pointers.
+- The first encoded key may be the internal empty-key sentinel.
 - Page compression and encryption are not part of this format.
 
 Any future incompatible change must increment the page format version.
@@ -199,19 +203,22 @@ Implementation tests should be derived directly from this format:
 - Reject pages with an invalid magic value.
 - Reject unsupported page versions.
 - Reject unknown node types.
-- Reject zero-length keys.
+- Accept an empty sentinel only in the first position.
+- Reject empty keys in every other position.
 - Reject unsorted keys.
 - Reject duplicate keys.
 - Reject offsets that move backward.
 - Reject offsets or records outside the page.
 - Reject leaf pages with missing values only when the public API forbids them.
 - Reject internal pages with non-empty values.
-- Reject internal pages with the wrong number of child pointers.
+- Reject internal pages with a zero child pointer.
+- Reject leaf pages with a nonzero child pointer.
+- Verify direct indexed key, value, pointer, and offset access.
+- Verify the exact encoded size returned by `nbytes()`.
 - Verify encoded pages are exactly `pageSize` bytes.
 
 ## Non-Goals
 
-- Implementing page serialization in this issue.
 - Implementing page allocation or free lists.
 - Implementing crash recovery or write-ahead logging.
 - Supporting overflow pages for very large keys or values.

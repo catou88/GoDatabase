@@ -73,39 +73,82 @@ len(values) == 0
 len(children) == len(keys) + 1
 ```
 
-## Future Disk-Backed Design
+## Disk-Backed Components
 
-The first B+Tree implementation should stay in memory. Disk pages, byte-level
-encoding, page numbers, free lists, and copy-on-write persistence should be
-designed after the in-memory tree is correct and well-tested.
+The repository now includes the building blocks for a disk-backed B+Tree:
 
-A later disk-backed design may represent nodes as fixed-size byte pages:
-
-```go
-type BNode []byte
-```
-
-That later design can add:
-
-- 4 KiB pages
+- 4 KiB serialized pages
+- leaf and internal page formats
 - page-number child references
-- encoded node headers
-- key/value offsets
+- encoded headers and key/value offsets
 - little-endian integer encoding
 - maximum key/value size limits
-- page allocation and reuse
+- page allocation and fixed-position reads and writes
+- alternating root metadata slots
+- metadata generations and checksums
+- durable root publication with two `fsync` phases
+- persistent free-page tracking and delayed page reuse
 
-Those details are intentionally out of scope for the initial in-memory B+Tree.
+These components are not yet connected to the in-memory B+Tree or the public
+`db.Database` API. The current B+Tree still uses direct `*node` pointers and
+mutates nodes in memory.
+
+## Book Alignment
+
+The persistent implementation should follow Chapters 4 through 7 of *Build
+Your Own Database From Scratch in Go* whenever the book's design fits the
+existing project. In particular:
+
+- Represent persistent nodes as `BNode []byte` and operate on the encoded page
+  through accessors such as `btype`, `nkeys`, `getPtr`, `getOffset`, `getKey`,
+  and `getVal`.
+- Use the book's internal-node convention in which each key is the lower bound
+  for its corresponding child and the number of keys equals the number of
+  child pointers.
+- Reserve an internal empty-key sentinel as the lowest key so lookups always
+  find a containing child. The sentinel is an implementation detail; empty
+  user keys remain invalid in the public API.
+- Isolate the B+Tree from storage through `get`, `new`, and `del` page
+  callbacks so the same tree algorithms can use fake in-memory pages in tests
+  and real pages in the durable KV store.
+- Build updates by copying encoded entries into replacement nodes. Committed
+  B+Tree pages must never be modified in place.
+- Split and merge nodes according to encoded byte size rather than a fixed key
+  count.
+- Use the book's two-phase update order: write pages, sync pages, publish root
+  metadata, and sync metadata.
+- Replace the bounded metadata-inline free list with the book's page-backed,
+  self-managing FIFO free list.
+
+Two deliberate implementation choices remain compatible with the book:
+
+- Keep the two checksummed metadata slots. Chapter 6 describes this
+  double-buffering scheme as the stronger alternative when a single metadata
+  write cannot be assumed power-loss atomic.
+- Continue using `ReadAt` and `WriteAt` initially instead of `mmap`. Chapter 6
+  treats `mmap` as a convenience rather than a requirement. The storage API
+  should not prevent adding `mmap` later.
+
+The existing page format uses the conventional `len(children) == len(keys)+1`
+layout. It should be migrated to the book's key-pointer-pair layout before the
+on-disk format is declared stable. No backward-compatibility promise should be
+made for development database files before that point.
 
 ## Search Behavior
 
-Search starts at the root.
+The current in-memory tree uses the conventional separator layout. Search
+starts at the root and, for each internal node:
 
-For each internal node:
-
-1. Find the first separator key greater than the search key.
+1. Find the first separator greater than the search key.
 2. Follow the child pointer at that position.
 3. Repeat until reaching a leaf.
+
+The persistent tree should instead follow the book's key-pointer-pair layout:
+
+1. Use `nodeLookupLE` to find the last key less than or equal to the search key.
+2. Follow the child pointer stored at that same index.
+3. Rely on the internal sentinel key to cover values below the first user key.
+4. Repeat until reaching a leaf.
 
 For each leaf node:
 
@@ -292,14 +335,118 @@ Internal invariant tests:
 
 Fuzz tests should compare B+Tree behavior against a simple `map[string]string` reference model.
 
-## Follow-Up Implementation Issues
+## Remaining Work
 
-- Implement B+Tree node search.
-- Implement B+Tree `Get`.
-- Implement B+Tree `Insert`.
-- Implement split propagation into parent nodes.
-- Add B+Tree invariant tests.
-- Add B+Tree range scan support.
-- Implement B+Tree `Delete`.
-- Add B+Tree fuzz tests against a map reference model.
-- Design page-backed B+Tree node format as a later persistence milestone.
+### Integrate the B+Tree with disk pages
+
+- Add the book-style `BTree` with a root page ID and `get`, `new`, and `del`
+  callbacks.
+- Add byte-page accessors and setters for headers, pointers, offsets, keys, and
+  values.
+- Add `nodeAppendKV`, `nodeAppendRange`, `leafInsert`, and `leafUpdate` helpers.
+- Implement `nodeLookupLE` over encoded keys.
+- Implement recursive copy-on-write `treeInsert`.
+- Replace a modified child with one to three newly written children.
+- Propagate splits through replacement parents and create a new root when the
+  old root splits.
+- Call `del` for every page replaced by the new tree version.
+- Test the tree first with the book's fake in-memory page callbacks, then bind
+  the same callbacks to the page manager.
+
+### Use encoded byte size for node balancing
+
+- Determine overflow from the encoded node size rather than only key count.
+- Add `nbytes`, `nodeSplit2`, and `nodeSplit3` equivalents.
+- Split nodes so every resulting serialized node fits in one 4 KiB page.
+- Produce one, two, or three pages when uneven key/value sizes require it.
+- Trigger deletion merges when an updated node uses no more than one quarter
+  of a page and the combined siblings fit in one page.
+- Test nodes containing keys and values near their maximum permitted sizes.
+
+### Add disk-backed deletion
+
+- Add book-style `leafDelete`, `nodeMerge`, `nodeReplace2Kid`, `shouldMerge`,
+  `treeDelete`, and `nodeDelete` operations over encoded pages.
+- Remove keys by creating replacement leaf pages.
+- Merge with a left or right sibling when `shouldMerge` permits it.
+- Propagate empty nodes and merged children through replacement parents.
+- Replace or remove an empty root as described by the high-level tree API.
+- Send replaced child, sibling, and root pages through the `del` callback.
+- Make those pages reusable only after the replacement root commits safely.
+- Add missing behavioral coverage for left-sibling redistribution.
+
+### Expose a durable KV API
+
+- Add a book-style `KV` type containing the path, file, B+Tree, page state, and
+  free list.
+- Add `Open(path)` and `Close()` behavior.
+- Connect public `Get`, `Set`, `Delete`, and `Range` operations to the
+  page-backed B+Tree.
+- Maintain pending appended and reused pages until commit.
+- Save the pre-update metadata state and restore it after write or sync errors.
+- Track a failed update and repair the last known metadata state before a later
+  write attempt.
+- Reopen the database from the latest valid root metadata.
+- Preserve the existing empty-key and range-bound semantics.
+- Decide whether the public API remains string-based or changes to `[]byte`.
+- Keep the map implementation available only as a test reference or remove it
+  after migration.
+
+### Add ordered disk iteration
+
+- Seek to the first leaf entry at or after a starting key.
+- Walk subsequent leaf entries in key order.
+- Continue across leaf pages without sorting the complete database in memory.
+- Support inclusive public range bounds.
+- Consider an iterator API so large ranges do not require one result slice.
+
+### Complete recovery validation
+
+- Decode the selected root page when opening the database.
+- Traverse every page reachable from the selected root.
+- Validate child page IDs, key ordering, parent-child bounds, node occupancy,
+  and equal leaf depth.
+- Reject corrupt committed trees instead of silently opening an empty database.
+- Detect unreachable pages left by interrupted operations.
+- Add fault-injection tests for page writes and both synchronization phases.
+- Sync the parent directory when creating the database file.
+
+### Integrate and scale free-page management
+
+- Replace the metadata-inline page ID list with the book's unrolled linked
+  list of fixed-size free-list pages.
+- Store multiple free page IDs plus a next-page pointer in each free-list node.
+- Track `headPage`, `headSeq`, `tailPage`, `tailSeq`, and `maxSeq`.
+- Implement `PopHead`, `PushTail`, and `SetMaxSeq`.
+- Make the free list recycle its consumed head pages and allocate its own tail
+  pages before extending the database file.
+- Route `BTree.new` through free-list-first page allocation.
+- Route `BTree.del` to the free-list tail.
+- Keep pending updates for reused pages separate from committed file pages.
+- Persist free-list head and tail state atomically with the tree root.
+- Use the book's sequence boundary to prevent pages from the current or
+  fallback version from being reused too early.
+- Reclaim crash-created orphan pages after recovery reachability validation.
+
+### Clarify append-only log responsibilities
+
+- Treat the book's Chapter 6 append-only KV as the copy-on-write page file. New
+  tree pages are appended until Chapter 7 introduces safe page reuse.
+- Do not treat `internal/kvlog` as the Chapter 6 storage engine. It is a
+  separate logical Set/Delete log experiment.
+- Decide whether that logical log remains a learning component or becomes a
+  later write-ahead log.
+- If retained in production, define when records are merged or compacted.
+- Document whether a checksum-invalid final record is discarded as a torn
+  write or treated as fatal corruption.
+- Prevent the logical log from growing indefinitely.
+
+### Validate the completed storage engine
+
+- Compare disk-backed behavior against a map reference model.
+- Run invariant checks after long insert/delete sequences.
+- Add reopen tests after root splits, merges, overwrites, and deletes.
+- Test crashes before page sync, before metadata write, and before metadata
+  sync.
+- Run fuzz tests against encoded pages and persistent operation sequences.
+- Compare B+Tree and durable-operation benchmarks with the map baseline.
