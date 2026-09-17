@@ -210,6 +210,40 @@ func TestKVOpenFallsBackWhenLatestCommittedRootIsCorrupt(t *testing.T) {
 	assertKVValue(t, kv, "alpha", "old")
 }
 
+func TestKVRepeatedUpdatesAndDeletesReusePages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.db")
+	kv := mustOpenKV(t, path)
+	defer closeKV(t, kv)
+
+	for i := 0; i < 12; i++ {
+		if err := kv.Set([]byte("key"), []byte(fmt.Sprintf("warm-%d", i))); err != nil {
+			t.Fatalf("warmup Set(%d) error = %v", i, err)
+		}
+	}
+	warmInfo, err := kv.pm.file.Stat()
+	if err != nil {
+		t.Fatalf("Stat(warm) error = %v", err)
+	}
+
+	for i := 0; i < 40; i++ {
+		deleted, err := kv.Delete([]byte("key"))
+		if err != nil || !deleted {
+			t.Fatalf("Delete(%d) = %v, %v; want true, nil", i, deleted, err)
+		}
+		if err := kv.Set([]byte("key"), []byte(fmt.Sprintf("value-%d", i))); err != nil {
+			t.Fatalf("Set(%d) error = %v", i, err)
+		}
+	}
+	finalInfo, err := kv.pm.file.Stat()
+	if err != nil {
+		t.Fatalf("Stat(final) error = %v", err)
+	}
+	if finalInfo.Size() > warmInfo.Size()+2*pageSize {
+		t.Fatalf("file grew from %d to %d during steady reuse", warmInfo.Size(), finalInfo.Size())
+	}
+	assertKVValue(t, kv, "key", "value-39")
+}
+
 func TestKVRejectsInvalidPathsAndClosedOperations(t *testing.T) {
 	if _, err := Open(""); err == nil {
 		t.Fatal("Open(empty path) error = nil, want error")

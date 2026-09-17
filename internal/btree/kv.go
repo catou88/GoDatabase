@@ -344,11 +344,12 @@ func recoverCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 			continue
 		}
 		pm.restore(pageManagerState{
-			nextPageID:     pm.nextPageID,
-			rootPageID:     metadata.rootPageID,
-			generation:     metadata.generation,
-			freePageIDs:    metadata.freePageIDs,
-			retiredPageIDs: metadata.retiredPageIDs,
+			nextPageID:      pm.nextPageID,
+			rootPageID:      metadata.rootPageID,
+			generation:      metadata.generation,
+			freePageIDs:     metadata.freePageIDs,
+			retiredPageIDs:  metadata.retiredPageIDs,
+			freeListPageIDs: metadata.freeListPageIDs,
 		})
 		pages, err := loadCommittedPages(pm)
 		if err == nil {
