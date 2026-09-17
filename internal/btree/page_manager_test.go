@@ -361,6 +361,136 @@ func TestPageManagerFallsBackToPreviousRootWhenLatestMetadataIsCorrupt(t *testin
 	}
 }
 
+func TestPageManagerReusesFreedPagesBeforeGrowingFile(t *testing.T) {
+	pm := newTestPageManager(t)
+	defer func() {
+		if err := pm.close(); err != nil {
+			t.Fatalf("close() error = %v", err)
+		}
+	}()
+
+	oldRoot := mustWritePageNode(t, pm, &pageNode{leaf: true, keys: []string{"a"}, values: []string{"old"}})
+	if err := pm.commitRoot(oldRoot); err != nil {
+		t.Fatalf("commitRoot(old root) error = %v", err)
+	}
+
+	newRoot := mustWritePageNode(t, pm, &pageNode{leaf: true, keys: []string{"a"}, values: []string{"new"}})
+	if err := pm.freePage(oldRoot); err != nil {
+		t.Fatalf("freePage(old root) error = %v", err)
+	}
+	if err := pm.commitRoot(newRoot); err != nil {
+		t.Fatalf("commitRoot(new root) error = %v", err)
+	}
+
+	// The old root remains quarantined while the fallback metadata slot refers to it.
+	thirdPage, err := pm.allocatePage()
+	if err != nil {
+		t.Fatalf("allocatePage(third page) error = %v", err)
+	}
+	if thirdPage == oldRoot {
+		t.Fatalf("allocatePage() reused quarantined root page %d", oldRoot)
+	}
+	if err := pm.writePage(thirdPage, testPage('c')); err != nil {
+		t.Fatalf("writePage(third page) error = %v", err)
+	}
+
+	if err := pm.commitRoot(newRoot); err != nil {
+		t.Fatalf("commitRoot(release old root) error = %v", err)
+	}
+	infoBefore, err := pm.file.Stat()
+	if err != nil {
+		t.Fatalf("Stat() before reuse error = %v", err)
+	}
+
+	reusedPage, err := pm.allocatePage()
+	if err != nil {
+		t.Fatalf("allocatePage(reuse) error = %v", err)
+	}
+	if reusedPage != oldRoot {
+		t.Fatalf("reused page id = %d, want freed page %d", reusedPage, oldRoot)
+	}
+	infoAfter, err := pm.file.Stat()
+	if err != nil {
+		t.Fatalf("Stat() after reuse error = %v", err)
+	}
+	if infoAfter.Size() != infoBefore.Size() {
+		t.Fatalf("file size after reuse = %d, want unchanged size %d", infoAfter.Size(), infoBefore.Size())
+	}
+}
+
+func TestPageManagerPersistsFreeListAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pages.db")
+	pm, err := openPageManager(path)
+	if err != nil {
+		t.Fatalf("openPageManager() error = %v", err)
+	}
+
+	rootPage := mustWritePageNode(t, pm, &pageNode{leaf: true, keys: []string{"root"}, values: []string{"live"}})
+	obsoletePage, err := pm.allocatePage()
+	if err != nil {
+		t.Fatalf("allocatePage(obsolete page) error = %v", err)
+	}
+	if err := pm.writePage(obsoletePage, testPage('x')); err != nil {
+		t.Fatalf("writePage(obsolete page) error = %v", err)
+	}
+	if err := pm.commitRoot(rootPage); err != nil {
+		t.Fatalf("commitRoot(initial) error = %v", err)
+	}
+	if err := pm.freePage(obsoletePage); err != nil {
+		t.Fatalf("freePage() error = %v", err)
+	}
+	if err := pm.commitRoot(rootPage); err != nil {
+		t.Fatalf("commitRoot(quarantine page) error = %v", err)
+	}
+	if err := pm.commitRoot(rootPage); err != nil {
+		t.Fatalf("commitRoot(persist free page) error = %v", err)
+	}
+	if err := pm.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+
+	reopened, err := openPageManager(path)
+	if err != nil {
+		t.Fatalf("reopen page manager error = %v", err)
+	}
+	defer func() {
+		if err := reopened.close(); err != nil {
+			t.Fatalf("close reopened manager error = %v", err)
+		}
+	}()
+
+	reusedPage, err := reopened.allocatePage()
+	if err != nil {
+		t.Fatalf("allocatePage() after restart error = %v", err)
+	}
+	if reusedPage != obsoletePage {
+		t.Fatalf("allocated page after restart = %d, want freed page %d", reusedPage, obsoletePage)
+	}
+	assertPageBytesEqual(t, reopened, rootPage, mustEncodePageNode(t, &pageNode{
+		leaf: true, keys: []string{"root"}, values: []string{"live"},
+	}))
+}
+
+func TestPageManagerRejectsDuplicateFree(t *testing.T) {
+	pm := newTestPageManager(t)
+	defer func() {
+		if err := pm.close(); err != nil {
+			t.Fatalf("close() error = %v", err)
+		}
+	}()
+
+	pageID, err := pm.allocatePage()
+	if err != nil {
+		t.Fatalf("allocatePage() error = %v", err)
+	}
+	if err := pm.freePage(pageID); err != nil {
+		t.Fatalf("freePage() error = %v", err)
+	}
+	if err := pm.freePage(pageID); !errors.Is(err, errInvalidPageID) {
+		t.Fatalf("second freePage() error = %v, want %v", err, errInvalidPageID)
+	}
+}
+
 func newTestPageManager(t *testing.T) *pageManager {
 	t.Helper()
 
@@ -411,6 +541,16 @@ func mustWritePageNode(t *testing.T, pm *pageManager, node *pageNode) uint64 {
 		t.Fatalf("writePage() error = %v", err)
 	}
 	return pageID
+}
+
+func mustEncodePageNode(t *testing.T, node *pageNode) []byte {
+	t.Helper()
+
+	page, err := encodePageNode(node)
+	if err != nil {
+		t.Fatalf("encodePageNode() error = %v", err)
+	}
+	return page
 }
 
 func mustReadPageNode(t *testing.T, pm *pageManager, pageID uint64) *pageNode {
