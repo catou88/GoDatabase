@@ -14,6 +14,16 @@ type pageTree struct {
 	del  func(uint64)
 }
 
+type treeEntry struct {
+	key   []byte
+	value []byte
+}
+
+type pageTreeCursorFrame struct {
+	node     BNode
+	childIdx uint16
+}
+
 func (tree *pageTree) getValue(key []byte) ([]byte, bool, error) {
 	if len(key) == 0 {
 		return nil, false, fmt.Errorf("key is empty")
@@ -42,6 +52,101 @@ func (tree *pageTree) getValue(key []byte) ([]byte, bool, error) {
 		}
 		node = tree.get(node.getPtr(idx))
 	}
+}
+
+func (tree *pageTree) rangeValues(start, end []byte) ([]treeEntry, error) {
+	if len(start) > maxKeySize {
+		return nil, fmt.Errorf("start key exceeds max size")
+	}
+	if len(end) > maxKeySize {
+		return nil, fmt.Errorf("end key exceeds max size")
+	}
+	if bytes.Compare(start, end) > 0 || tree.root == 0 {
+		return []treeEntry{}, nil
+	}
+	if err := tree.validateCallbacks(); err != nil {
+		return nil, err
+	}
+
+	leaf, entryIdx, path, err := tree.seekRangeStart(start)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]treeEntry, 0)
+	for {
+		for entryIdx < leaf.nkeys() {
+			idx := entryIdx
+			key := leaf.getKey(idx)
+			entryIdx++
+			if len(key) == 0 || bytes.Compare(key, start) < 0 {
+				continue
+			}
+			if bytes.Compare(key, end) > 0 {
+				return entries, nil
+			}
+			entries = append(entries, treeEntry{
+				key:   append([]byte(nil), key...),
+				value: append([]byte(nil), leaf.getVal(idx)...),
+			})
+		}
+
+		leaf, path, err = tree.nextLeaf(path)
+		if err != nil {
+			return nil, err
+		}
+		if leaf == nil {
+			return entries, nil
+		}
+		entryIdx = 0
+	}
+}
+
+func (tree *pageTree) seekRangeStart(start []byte) (BNode, uint16, []pageTreeCursorFrame, error) {
+	node := tree.get(tree.root)
+	path := make([]pageTreeCursorFrame, 0)
+	for {
+		if err := validateBNode(node); err != nil {
+			return nil, 0, nil, fmt.Errorf("read range page: %w", err)
+		}
+		if node.btype() == nodeTypeLeaf {
+			idx := sort.Search(int(node.nkeys()), func(i int) bool {
+				return bytes.Compare(node.getKey(uint16(i)), start) >= 0
+			})
+			return node, uint16(idx), path, nil
+		}
+		idx, err := nodeLookupLE(node, start)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		path = append(path, pageTreeCursorFrame{node: node, childIdx: idx})
+		node = tree.get(node.getPtr(idx))
+	}
+}
+
+func (tree *pageTree) nextLeaf(path []pageTreeCursorFrame) (BNode, []pageTreeCursorFrame, error) {
+	for len(path) > 0 {
+		last := len(path) - 1
+		frame := path[last]
+		if frame.childIdx+1 >= frame.node.nkeys() {
+			path = path[:last]
+			continue
+		}
+
+		frame.childIdx++
+		path[last] = frame
+		node := tree.get(frame.node.getPtr(frame.childIdx))
+		for {
+			if err := validateBNode(node); err != nil {
+				return nil, nil, fmt.Errorf("read range page: %w", err)
+			}
+			if node.btype() == nodeTypeLeaf {
+				return node, path, nil
+			}
+			path = append(path, pageTreeCursorFrame{node: node, childIdx: 0})
+			node = tree.get(node.getPtr(0))
+		}
+	}
+	return nil, path, nil
 }
 
 func (tree *pageTree) insert(key, value []byte) error {
