@@ -430,16 +430,16 @@ Fuzz tests should compare B+Tree behavior against a simple `map[string]string` r
 
 ### Clarify append-only log responsibilities
 
-- Treat the book's Chapter 6 append-only KV as the copy-on-write page file. New
-  tree pages are appended until Chapter 7 introduces safe page reuse.
-- Do not treat `internal/kvlog` as the Chapter 6 storage engine. It is a
-  separate logical Set/Delete log experiment.
-- Decide whether that logical log remains a learning component or becomes a
-  later write-ahead log.
-- If retained in production, define when records are merged or compacted.
-- Document whether a checksum-invalid final record is discarded as a torn
-  write or treated as fatal corruption.
-- Prevent the logical log from growing indefinitely.
+- The copy-on-write page file and its checksummed root metadata are the sole
+  authoritative source of committed database state.
+- The experimental logical Set/Delete log has been removed because it was not
+  part of the durable KV commit or recovery path.
+- The database does not currently use a write-ahead log. Adding one later must
+  be justified by a new requirement such as grouped transactions rather than
+  duplicating the existing single-operation durability protocol.
+- Any future WAL design requires transaction identifiers, an explicit commit
+  record, page-commit ordering, checkpoint boundaries, bounded truncation, and
+  documented torn-tail and checksum-corruption handling before implementation.
 
 ### Validate the completed storage engine
 
