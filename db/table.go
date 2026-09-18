@@ -44,6 +44,30 @@ type Table struct {
 	schema TableSchema
 }
 
+// Get returns the row identified by primaryKey and whether it exists.
+// Values are returned using the Go type implied by each column.
+func (t *Table) Get(primaryKey any) (map[string]any, bool, error) {
+	t.db.mu.RLock()
+	defer t.db.mu.RUnlock()
+	if t.db.closed {
+		return nil, false, ErrClosed
+	}
+	key, err := t.rowKey(primaryKey)
+	if err != nil {
+		return nil, false, err
+	}
+	raw, found, err := t.db.getLocked(key)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	row, err := decodeRow(t.schema, []byte(raw))
+	if err != nil {
+		return nil, false, err
+	}
+	row[t.primaryColumn().Name] = primaryKey
+	return row, true, nil
+}
+
 // CreateTable creates a table and returns its handle. Table names are unique.
 func (d *Database) CreateTable(schema TableSchema) (*Table, error) {
 	d.mu.Lock()
@@ -108,6 +132,20 @@ func (t *Table) Insert(row map[string]any) error {
 	}
 	return t.db.setLocked(key, value)
 }
+
+func (t *Table) rowKey(primaryKey any) (string, error) {
+	encoded, err := encodeValue(t.primaryColumn(), primaryKey)
+	if err != nil {
+		return "", err
+	}
+	key := append(rowPrefix(t.schema.Name), encoded...)
+	if len(key) > 1000 {
+		return "", ErrInvalidRow
+	}
+	return string(key), nil
+}
+
+func (t *Table) primaryColumn() Column { return findPrimary(t.schema) }
 
 func (d *Database) getLocked(key string) (string, bool, error) {
 	if d.durable != nil {
@@ -277,7 +315,7 @@ func encodeRow(s TableSchema, row map[string]any) (string, string, error) {
 		}
 		binary.LittleEndian.PutUint16(x[:2], uint16(i+1))
 		out = append(out, x[:2]...)
-		out = append(out, 0, 0, 0, 0)
+		out = append(out, 0, 0, 0, 0, 0, 0)
 		binary.LittleEndian.PutUint32(x[:], uint32(len(ev)))
 		copy(out[len(out)-4:], x[:])
 		out = append(out, ev...)
@@ -286,6 +324,70 @@ func encodeRow(s TableSchema, row map[string]any) (string, string, error) {
 		return "", "", ErrInvalidRow
 	}
 	return string(key), string(out), nil
+}
+
+func decodeRow(s TableSchema, data []byte) (map[string]any, error) {
+	if len(data) < 12 || string(data[:4]) != "GDRW" || binary.LittleEndian.Uint16(data[4:6]) != 1 {
+		return nil, ErrInvalidRow
+	}
+	if binary.LittleEndian.Uint32(data[6:10]) != 1 {
+		return nil, ErrInvalidRow
+	}
+	count := int(binary.LittleEndian.Uint16(data[10:12]))
+	if count != len(s.Columns)-1 {
+		return nil, ErrInvalidRow
+	}
+	row := make(map[string]any, len(s.Columns)-1)
+	pos := 12
+	lastID := uint16(0)
+	for i := 0; i < count; i++ {
+		if pos+8 > len(data) {
+			return nil, ErrInvalidRow
+		}
+		id := binary.LittleEndian.Uint16(data[pos : pos+2])
+		flags := data[pos+2]
+		length := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
+		pos += 8
+		if id <= lastID || flags != 0 || pos+length > len(data) {
+			return nil, ErrInvalidRow
+		}
+		if id > uint16(len(s.Columns)) || s.Columns[id-1].PrimaryKey {
+			return nil, ErrInvalidRow
+		}
+		column := s.Columns[id-1]
+		value, err := decodeValue(column, data[pos:pos+length])
+		if err != nil {
+			return nil, err
+		}
+		row[column.Name] = value
+		lastID = id
+		pos += length
+	}
+	if pos != len(data) {
+		return nil, ErrInvalidRow
+	}
+	return row, nil
+}
+
+func decodeValue(c Column, data []byte) (any, error) {
+	switch c.Type {
+	case ColumnInt64:
+		if len(data) != 8 {
+			return nil, ErrInvalidRow
+		}
+		return int64(binary.BigEndian.Uint64(data) ^ (1 << 63)), nil
+	case ColumnString:
+		return string(data), nil
+	case ColumnBytes:
+		return append([]byte(nil), data...), nil
+	case ColumnBool:
+		if len(data) != 1 || data[0] > 1 {
+			return nil, ErrInvalidRow
+		}
+		return data[0] == 1, nil
+	default:
+		return nil, ErrInvalidRow
+	}
 }
 func findPrimary(s TableSchema) Column {
 	for _, c := range s.Columns {
