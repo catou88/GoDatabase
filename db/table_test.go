@@ -292,3 +292,101 @@ func TestTableRangeRejectsInvalidBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateIndexOnEmptyTable(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := db.Index{Name: "name_idx", Column: "name"}
+	if err := table.CreateIndex(index); err != nil {
+		t.Fatalf("CreateIndex() error = %v", err)
+	}
+	if got := table.Indexes(); len(got) != 1 || got[0] != index {
+		t.Fatalf("Indexes() = %#v, want %#v", got, []db.Index{index})
+	}
+	if err := table.CreateIndex(index); !errors.Is(err, db.ErrIndexExists) {
+		t.Fatalf("duplicate CreateIndex() error = %v, want %v", err, db.ErrIndexExists)
+	}
+}
+
+func TestCreateIndexBackfillsExistingRows(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []map[string]any{
+		{"id": int64(1), "name": "Ada", "active": true},
+		{"id": int64(2), "name": "Grace", "active": true},
+		{"id": int64(3), "name": "Ada", "active": false},
+	} {
+		if err := table.Insert(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nonUnique := db.Index{Name: "name_idx", Column: "name"}
+	if err := table.CreateIndex(nonUnique); err != nil {
+		t.Fatalf("CreateIndex(non-unique) error = %v", err)
+	}
+	unique := db.Index{Name: "unique_name_idx", Column: "name", Unique: true}
+	if err := table.CreateIndex(unique); !errors.Is(err, db.ErrDuplicateIndexed) {
+		t.Fatalf("CreateIndex(unique duplicate) error = %v, want %v", err, db.ErrDuplicateIndexed)
+	}
+}
+
+func TestIndexMetadataPersistsAndDefinitionsValidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.db")
+	database, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := db.Index{Name: "active_idx", Column: "active", Unique: true}
+	if err := table.CreateIndex(index); err != nil {
+		t.Fatal(err)
+	}
+	if err := table.Insert(map[string]any{"id": int64(1), "name": "Ada", "active": true}); err != nil {
+		t.Fatalf("Insert(first indexed row) error = %v", err)
+	}
+	if err := table.Insert(map[string]any{"id": int64(2), "name": "Grace", "active": true}); !errors.Is(err, db.ErrDuplicateIndexed) {
+		t.Fatalf("Insert(duplicate indexed value) error = %v, want %v", err, db.ErrDuplicateIndexed)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	reopened, err := database.OpenTable("users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Indexes(); len(got) != 1 || got[0] != index {
+		t.Fatalf("reopened Indexes() = %#v, want %#v", got, []db.Index{index})
+	}
+}
+
+func TestCreateIndexRejectsInvalidDefinitions(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []db.Index{
+		{Name: "", Column: "name"},
+		{Name: "missing_column", Column: "missing"},
+		{Name: "primary_key", Column: "id"},
+	} {
+		if err := table.CreateIndex(index); !errors.Is(err, db.ErrInvalidSchema) {
+			t.Errorf("CreateIndex(%#v) error = %v, want %v", index, err, db.ErrInvalidSchema)
+		}
+	}
+}

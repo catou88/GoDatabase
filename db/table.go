@@ -41,8 +41,9 @@ var (
 
 // Table is a handle for operations on one durable or in-memory table.
 type Table struct {
-	db     *Database
-	schema TableSchema
+	db      *Database
+	schema  TableSchema
+	indexes map[string]Index
 }
 
 // Range returns rows whose primary keys are between start and end, inclusive.
@@ -131,7 +132,7 @@ func (d *Database) CreateTable(schema TableSchema) (*Table, error) {
 	if err := d.setLocked(key, encodeDescriptor(schema)); err != nil {
 		return nil, err
 	}
-	return &Table{db: d, schema: cloneSchema(schema)}, nil
+	return &Table{db: d, schema: cloneSchema(schema), indexes: make(map[string]Index)}, nil
 }
 
 // OpenTable opens an existing table by name.
@@ -152,7 +153,11 @@ func (d *Database) OpenTable(name string) (*Table, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Table{db: d, schema: schema}, nil
+	indexes, err := loadIndexesLocked(d, schema)
+	if err != nil {
+		return nil, err
+	}
+	return &Table{db: d, schema: schema, indexes: indexes}, nil
 }
 
 // Schema returns a copy of the table schema.
@@ -174,7 +179,43 @@ func (t *Table) Insert(row map[string]any) error {
 	} else if found {
 		return ErrDuplicatePrimary
 	}
-	return t.db.setLocked(key, value)
+	indexEntries, err := t.indexEntriesForRow(row, key)
+	if err != nil {
+		return err
+	}
+	if err := t.db.setLocked(key, value); err != nil {
+		return err
+	}
+	for _, entry := range indexEntries {
+		if err := t.db.setLocked(entry.key, entry.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type indexEntry struct{ key, value string }
+
+func (t *Table) indexEntriesForRow(row map[string]any, rowKey string) ([]indexEntry, error) {
+	entries := make([]indexEntry, 0, len(t.indexes))
+	primaryKey := []byte(rowKey[len(rowPrefix(t.schema.Name)):])
+	for _, index := range t.indexes {
+		column := columnByName(t.schema, index.Column)
+		indexedValue, err := encodeValue(column, row[index.Column])
+		if err != nil {
+			return nil, err
+		}
+		key := indexEntryKey(t.schema.Name, index, indexedValue, primaryKey)
+		if index.Unique {
+			if _, found, err := t.db.getLocked(key); err != nil {
+				return nil, err
+			} else if found {
+				return nil, ErrDuplicateIndexed
+			}
+		}
+		entries = append(entries, indexEntry{key: key, value: string(primaryKey)})
+	}
+	return entries, nil
 }
 
 func (t *Table) rowKey(primaryKey any) (string, error) {
