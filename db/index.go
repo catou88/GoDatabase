@@ -12,10 +12,66 @@ type Index struct {
 	Unique bool
 }
 
+// FindByIndex returns rows whose indexed column equals value, ordered by
+// primary key. The table row remains the authoritative source of values.
+func (t *Table) FindByIndex(indexName string, value any) ([]map[string]any, error) {
+	t.db.mu.RLock()
+	defer t.db.mu.RUnlock()
+	if t.db.closed {
+		return nil, ErrClosed
+	}
+	index, ok := t.indexes[indexName]
+	if !ok {
+		return nil, ErrIndexNotFound
+	}
+	column := columnByName(t.schema, index.Column)
+	encoded, err := encodeValue(column, value)
+	if err != nil {
+		return nil, err
+	}
+	prefix := append(indexEntryPrefix(t.schema.Name, index.Name), encoded...)
+	entries, err := t.db.rangeLocked(string(prefix), string(prefixEnd(prefix)))
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]any, 0, len(entries))
+	entryPrefix := string(prefix)
+	for _, entry := range entries {
+		if len(entry.Key) < len(entryPrefix) || entry.Key[:len(entryPrefix)] != entryPrefix {
+			continue
+		}
+		var primaryKey []byte
+		if index.Unique {
+			primaryKey = []byte(entry.Value)
+		} else {
+			primaryKey = []byte(entry.Key[len(entryPrefix):])
+		}
+		rowKey := append(rowPrefix(t.schema.Name), primaryKey...)
+		rowValue, found, err := t.db.getLocked(string(rowKey))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, ErrInvalidRow
+		}
+		row, err := decodeRow(t.schema, []byte(rowValue))
+		if err != nil {
+			return nil, err
+		}
+		row[t.primaryColumn().Name], err = decodePrimaryKey(t.primaryColumn(), primaryKey)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
 var (
 	ErrIndexExists      = fmt.Errorf("index already exists")
 	ErrIndexNotFound    = fmt.Errorf("index not found")
 	ErrDuplicateIndexed = fmt.Errorf("duplicate indexed value")
+	ErrRowNotFound      = fmt.Errorf("row not found")
 )
 
 // CreateIndex creates and backfills an index on column. Existing rows are

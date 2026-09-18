@@ -390,3 +390,67 @@ func TestCreateIndexRejectsInvalidDefinitions(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexesStayConsistentAfterInsertUpdateAndDelete(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := db.Index{Name: "name_idx", Column: "name"}
+	if err := table.CreateIndex(index); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []map[string]any{
+		{"id": int64(1), "name": "Ada", "active": true},
+		{"id": int64(2), "name": "Grace", "active": true},
+		{"id": int64(3), "name": "Ada", "active": false},
+	} {
+		if err := table.Insert(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertIndexedRowsMatchScan(t, table, "name_idx", "Ada")
+
+	if err := table.Update(map[string]any{"id": int64(2), "name": "Ada", "active": true}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertIndexedRowsMatchScan(t, table, "name_idx", "Ada")
+	assertIndexedRowsMatchScan(t, table, "name_idx", "Grace")
+
+	deleted, err := table.Delete(int64(1))
+	if err != nil || !deleted {
+		t.Fatalf("Delete() = (%v, %v), want (true, nil)", deleted, err)
+	}
+	assertIndexedRowsMatchScan(t, table, "name_idx", "Ada")
+	deleted, err = table.Delete(int64(1))
+	if err != nil || deleted {
+		t.Fatalf("second Delete() = (%v, %v), want (false, nil)", deleted, err)
+	}
+}
+
+func assertIndexedRowsMatchScan(t *testing.T, table *db.Table, indexName string, value string) {
+	t.Helper()
+	indexed, err := table.FindByIndex(indexName, value)
+	if err != nil {
+		t.Fatalf("FindByIndex(%q) error = %v", value, err)
+	}
+	scanned, err := table.Range(int64(-1<<62), int64(1<<62-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]int64, 0)
+	for _, row := range scanned {
+		if row["name"] == value {
+			want = append(want, row["id"].(int64))
+		}
+	}
+	if len(indexed) != len(want) {
+		t.Fatalf("FindByIndex(%q) returned %d rows, full scan found %d", value, len(indexed), len(want))
+	}
+	for i, row := range indexed {
+		if row["name"] != value || row["id"].(int64) != want[i] {
+			t.Fatalf("FindByIndex(%q)[%d] = %#v, want primary key %d", value, i, row, want[i])
+		}
+	}
+}

@@ -179,7 +179,7 @@ func (t *Table) Insert(row map[string]any) error {
 	} else if found {
 		return ErrDuplicatePrimary
 	}
-	indexEntries, err := t.indexEntriesForRow(row, key)
+	indexEntries, err := t.indexEntriesForRow(row, key, false)
 	if err != nil {
 		return err
 	}
@@ -194,9 +194,90 @@ func (t *Table) Insert(row map[string]any) error {
 	return nil
 }
 
+// Update replaces an existing row with the same primary key and maintains
+// configured secondary indexes.
+func (t *Table) Update(row map[string]any) error {
+	t.db.mu.Lock()
+	defer t.db.mu.Unlock()
+	if t.db.closed {
+		return ErrClosed
+	}
+	key, value, err := encodeRow(t.schema, row)
+	if err != nil {
+		return err
+	}
+	oldValue, found, err := t.db.getLocked(key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrRowNotFound
+	}
+	oldRow, err := decodeRow(t.schema, []byte(oldValue))
+	if err != nil {
+		return err
+	}
+	oldEntries, err := t.indexEntriesForRow(oldRow, key, true)
+	if err != nil {
+		return err
+	}
+	newEntries, err := t.indexEntriesForRow(row, key, true)
+	if err != nil {
+		return err
+	}
+	if err := t.db.setLocked(key, value); err != nil {
+		return err
+	}
+	for _, entry := range oldEntries {
+		if err := t.db.deleteLocked(entry.key); err != nil {
+			return err
+		}
+	}
+	for _, entry := range newEntries {
+		if err := t.db.setLocked(entry.key, entry.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Delete removes a row and its secondary-index entries.
+func (t *Table) Delete(primaryKey any) (bool, error) {
+	t.db.mu.Lock()
+	defer t.db.mu.Unlock()
+	if t.db.closed {
+		return false, ErrClosed
+	}
+	key, err := t.rowKey(primaryKey)
+	if err != nil {
+		return false, err
+	}
+	value, found, err := t.db.getLocked(key)
+	if err != nil || !found {
+		return found, err
+	}
+	row, err := decodeRow(t.schema, []byte(value))
+	if err != nil {
+		return false, err
+	}
+	entries, err := t.indexEntriesForRow(row, key, true)
+	if err != nil {
+		return false, err
+	}
+	if err := t.db.deleteLocked(key); err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if err := t.db.deleteLocked(entry.key); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 type indexEntry struct{ key, value string }
 
-func (t *Table) indexEntriesForRow(row map[string]any, rowKey string) ([]indexEntry, error) {
+func (t *Table) indexEntriesForRow(row map[string]any, rowKey string, allowExisting bool) ([]indexEntry, error) {
 	entries := make([]indexEntry, 0, len(t.indexes))
 	primaryKey := []byte(rowKey[len(rowPrefix(t.schema.Name)):])
 	for _, index := range t.indexes {
@@ -209,7 +290,7 @@ func (t *Table) indexEntriesForRow(row map[string]any, rowKey string) ([]indexEn
 		if index.Unique {
 			if _, found, err := t.db.getLocked(key); err != nil {
 				return nil, err
-			} else if found {
+			} else if found && !allowExisting {
 				return nil, ErrDuplicateIndexed
 			}
 		}
@@ -239,6 +320,15 @@ func (d *Database) getLocked(key string) (string, bool, error) {
 	}
 	v, ok := d.data[key]
 	return v, ok, nil
+}
+
+func (d *Database) deleteLocked(key string) error {
+	if d.durable != nil {
+		_, err := d.durable.Delete([]byte(key))
+		return translateError(err)
+	}
+	delete(d.data, key)
+	return nil
 }
 func (d *Database) setLocked(key, value string) error {
 	if d.durable != nil {
