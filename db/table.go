@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // ColumnType identifies the supported table column representation.
@@ -42,6 +43,49 @@ var (
 type Table struct {
 	db     *Database
 	schema TableSchema
+}
+
+// Range returns rows whose primary keys are between start and end, inclusive.
+// Rows are returned in ascending primary-key order.
+func (t *Table) Range(start, end any) ([]map[string]any, error) {
+	t.db.mu.RLock()
+	defer t.db.mu.RUnlock()
+	if t.db.closed {
+		return nil, ErrClosed
+	}
+	startKey, err := t.rowKey(start)
+	if err != nil {
+		return nil, err
+	}
+	endKey, err := t.rowKey(end)
+	if err != nil {
+		return nil, err
+	}
+	if startKey > endKey {
+		return []map[string]any{}, nil
+	}
+	entries, err := t.db.rangeLocked(startKey, endKey)
+	if err != nil {
+		return nil, err
+	}
+	prefix := rowPrefix(t.schema.Name)
+	rows := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		if !hasPrefix([]byte(entry.Key), prefix) {
+			continue
+		}
+		row, err := decodeRow(t.schema, []byte(entry.Value))
+		if err != nil {
+			return nil, err
+		}
+		primary, err := decodePrimaryKey(t.primaryColumn(), []byte(entry.Key[len(prefix):]))
+		if err != nil {
+			return nil, err
+		}
+		row[t.primaryColumn().Name] = primary
+		rows = append(rows, row)
+	}
+	return rows, nil
 }
 
 // Get returns the row identified by primaryKey and whether it exists.
@@ -161,6 +205,36 @@ func (d *Database) setLocked(key, value string) error {
 	}
 	d.data[key] = value
 	return nil
+}
+
+func (d *Database) rangeLocked(start, end string) ([]Item, error) {
+	if d.durable != nil {
+		entries, err := d.durable.Range([]byte(start), []byte(end))
+		if err != nil {
+			return nil, translateError(err)
+		}
+		items := make([]Item, len(entries))
+		for i, entry := range entries {
+			items[i] = Item{Key: string(entry.Key), Value: string(entry.Value)}
+		}
+		return items, nil
+	}
+	keys := make([]string, 0, len(d.data))
+	for key := range d.data {
+		if key >= start && key <= end {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	items := make([]Item, len(keys))
+	for i, key := range keys {
+		items[i] = Item{Key: key, Value: d.data[key]}
+	}
+	return items, nil
+}
+
+func hasPrefix(value, prefix []byte) bool {
+	return len(value) >= len(prefix) && string(value[:len(prefix)]) == string(prefix)
 }
 
 func validateSchema(s TableSchema) error {
@@ -388,6 +462,32 @@ func decodeValue(c Column, data []byte) (any, error) {
 	default:
 		return nil, ErrInvalidRow
 	}
+}
+
+func decodePrimaryKey(c Column, data []byte) (any, error) {
+	if c.Type == ColumnInt64 {
+		if len(data) != 8 {
+			return nil, ErrInvalidRow
+		}
+		return int64(binary.BigEndian.Uint64(data) ^ (1 << 63)), nil
+	}
+	if c.Type != ColumnString || len(data) < 2 || data[len(data)-2] != 0 || data[len(data)-1] != 0 {
+		return nil, ErrInvalidRow
+	}
+	encoded := data[:len(data)-2]
+	decoded := make([]byte, 0, len(encoded))
+	for i := 0; i < len(encoded); i++ {
+		if encoded[i] != 0 {
+			decoded = append(decoded, encoded[i])
+			continue
+		}
+		if i+1 >= len(encoded) || encoded[i+1] != 0xff {
+			return nil, ErrInvalidRow
+		}
+		decoded = append(decoded, 0)
+		i++
+	}
+	return string(decoded), nil
 }
 func findPrimary(s TableSchema) Column {
 	for _, c := range s.Columns {
