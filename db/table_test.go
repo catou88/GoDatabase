@@ -211,3 +211,84 @@ func TestTableGetAfterDatabaseClose(t *testing.T) {
 		t.Fatalf("Get after Close() = (%v, %v, %v), want closed error", row, found, err)
 	}
 }
+
+func TestTableRangeReturnsOrderedRows(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []int64{5, 1, 3, 2, 4} {
+		if err := table.Insert(map[string]any{"id": key, "name": "row", "active": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := table.Range(int64(2), int64(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("Range() returned %d rows, want 3", len(rows))
+	}
+	for i, want := range []int64{2, 3, 4} {
+		if got := rows[i]["id"]; got != want {
+			t.Errorf("rows[%d][id] = %v, want %d", i, got, want)
+		}
+	}
+}
+
+func TestTableRangeHandlesEmptyAndNonmatchingRanges(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := table.Insert(map[string]any{"id": int64(2), "name": "row", "active": true}); err != nil {
+		t.Fatal(err)
+	}
+	for name, bounds := range map[string][2]int64{
+		"no match": [2]int64{3, 4},
+		"reversed": [2]int64{4, 3},
+	} {
+		rows, err := table.Range(bounds[0], bounds[1])
+		if err != nil || len(rows) != 0 {
+			t.Errorf("%s Range() = (%v, %v), want empty, nil", name, rows, err)
+		}
+	}
+}
+
+func TestTableRangeDoesNotCrossTableBoundaries(t *testing.T) {
+	database := db.New()
+	first, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSchema := testSchema()
+	secondSchema.Name = "accounts"
+	second, err := database.CreateTable(secondSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []*db.Table{first, second} {
+		if err := table.Insert(map[string]any{"id": int64(1), "name": "row", "active": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := first.Range(int64(1), int64(1))
+	if err != nil || len(rows) != 1 || rows[0]["id"] != int64(1) {
+		t.Fatalf("first Range() = (%v, %v), want one row from first table", rows, err)
+	}
+}
+
+func TestTableRangeRejectsInvalidBounds(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bounds := range [][2]any{{"1", int64(2)}, {nil, int64(2)}, {int64(1), "2"}} {
+		if rows, err := table.Range(bounds[0], bounds[1]); !errors.Is(err, db.ErrInvalidRow) || rows != nil {
+			t.Errorf("Range(%v, %v) = (%v, %v), want invalid row", bounds[0], bounds[1], rows, err)
+		}
+	}
+}
