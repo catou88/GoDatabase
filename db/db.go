@@ -25,7 +25,8 @@ type Item struct {
 //
 // A Database returned by Open owns its underlying file and must be closed when
 // it is no longer needed. Close is idempotent. Operations after Close return
-// ErrClosed.
+// ErrClosed. A Database is safe for concurrent use by multiple goroutines, but
+// multiple Database handles must not access the same durable file concurrently.
 type Database struct {
 	mu      sync.RWMutex
 	data    map[string]string
