@@ -17,6 +17,8 @@ var (
 	ErrTransactionClosed = errors.New("transaction is closed")
 	// ErrReadOnlyTransaction is returned when a read-only transaction writes.
 	ErrReadOnlyTransaction = errors.New("transaction is read-only")
+	// ErrWriteTransactionActive is returned when a second writer starts.
+	ErrWriteTransactionActive = errors.New("write transaction already active")
 )
 
 // Item is a key-value pair returned by range queries.
@@ -65,7 +67,7 @@ func (d *Database) Begin(options TxOptions) (*Tx, error) {
 		return nil, ErrClosed
 	}
 	if !options.ReadOnly && d.writerActive {
-		return nil, errors.New("write transaction already active")
+		return nil, ErrWriteTransactionActive
 	}
 	if !options.ReadOnly {
 		d.writerActive = true
