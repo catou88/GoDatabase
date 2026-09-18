@@ -152,7 +152,9 @@ user data.
 
 A single public `*db.Database` may be called by multiple goroutines. Operations
 are synchronized with the database lifecycle, so `Close` cannot race through an
-active public operation. The durable engine currently serializes its operations,
+active public operation. Concurrent readers are safe, and conflicting writes
+are serialized. A transaction buffers its mutations and publishes them through
+one durable root commit. The durable engine currently serializes its operations,
 including reads, and does not yet provide concurrent snapshot readers or
 independent writer versions.
 
