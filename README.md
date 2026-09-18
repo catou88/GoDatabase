@@ -43,3 +43,6 @@ and must call `Close`. `New` remains available for temporary in-memory storage.
 
 See [Durable Storage](docs/durable-storage.md) for API semantics, durability and
 recovery guarantees, free-page reuse, compatibility, and known limitations.
+
+See [Profiling GoDatabase](docs/profiling.md) for copy-pasteable CPU, memory,
+allocation, and execution-trace workflows.
