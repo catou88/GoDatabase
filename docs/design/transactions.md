@@ -5,8 +5,10 @@
 Define a transaction API for grouping database operations while preserving the
 durability and versioned-tree guarantees of the storage engine.
 
-This document defines the intended contract. The transaction API is not yet
-implemented.
+This document defines the intended contract. The current implementation
+provides buffered atomic KV transactions, serialized read-write transaction
+admission, and rollback. Immutable snapshot roots, reader version pinning, and
+transaction-aware table/index maintenance remain follow-up work.
 
 ## Proposed API
 
@@ -42,7 +44,7 @@ the underlying model.
 
 ## Transaction Lifecycle
 
-1. `Begin` captures a committed root generation.
+1. `Begin` opens a transaction view.
 2. Operations read from the transaction's pinned version.
 3. A read-write transaction records changes in private copy-on-write pages.
 4. `Commit` writes new pages, synchronizes them, and publishes a new root.
@@ -106,7 +108,7 @@ known committed generation so retrying or reopening remains safe.
 
 ## Isolation Guarantee
 
-The initial isolation level is **snapshot isolation for readers with serialized
+The target isolation level is **snapshot isolation for readers with serialized
 writes**:
 
 - A transaction reads one pinned root generation.
@@ -116,6 +118,11 @@ writes**:
 - A writer's uncommitted pages are invisible to other transactions.
 - Only one read-write transaction commits at a time on a database handle.
 - A successful commit becomes visible as one new root generation.
+
+The current implementation has not yet added immutable root pinning. A
+transaction's buffered writes are isolated until commit, but reads of keys that
+are not buffered use the database's current committed state. Full snapshot
+isolation therefore remains a follow-up implementation task.
 
 This is not full serializable isolation. A future version may provide explicit
 version handles and multiple independent writers, but it must define how a
@@ -173,6 +180,10 @@ The initial transaction implementation does not provide:
 - automatic retry after a failed commit.
 
 ## Required Tests
+
+The current atomic-transaction implementation tests commit, rollback, durable
+reopen, read-only write rejection, closed transactions, and failed batch
+commits. The remaining tests below apply to the future snapshot implementation.
 
 Before implementation is considered complete, add tests for:
 

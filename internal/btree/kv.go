@@ -18,6 +18,13 @@ type Entry struct {
 	Value []byte
 }
 
+// Mutation is one operation in an atomic KV batch.
+type Mutation struct {
+	Key    []byte
+	Value  []byte
+	Delete bool
+}
+
 // KV is a durable key-value store backed by copy-on-write B+Tree pages.
 type KV struct {
 	mu        sync.Mutex
@@ -142,6 +149,34 @@ func (kv *KV) Delete(key []byte) (bool, error) {
 		return deleted, err
 	})
 	return deleted, err
+}
+
+// ApplyBatch applies all mutations with one copy-on-write commit. If any
+// mutation fails, no new root is published.
+func (kv *KV) ApplyBatch(mutations []Mutation) error {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.closed {
+		return ErrClosed
+	}
+	return kv.update(func() (bool, error) {
+		changed := false
+		for _, mutation := range mutations {
+			if mutation.Delete {
+				deleted, err := kv.tree.delete(mutation.Key)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || deleted
+				continue
+			}
+			if err := kv.tree.insert(mutation.Key, mutation.Value); err != nil {
+				return false, err
+			}
+			changed = true
+		}
+		return changed, nil
+	})
 }
 
 func (kv *KV) update(change func() (bool, error)) error {
