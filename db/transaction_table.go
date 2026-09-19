@@ -120,7 +120,7 @@ func transactionIndexEntries(tx *Tx, table *Table, row map[string]any, rowKey st
 	primaryKey := []byte(rowKey[len(rowPrefix(table.schema.Name)):])
 	for _, index := range table.indexes {
 		column := columnByName(table.schema, index.Column)
-		indexedValue, err := encodeValue(column, row[index.Column])
+		indexedValue, err := encodeIndexValue(column, row[index.Column])
 		if err != nil {
 			return nil, err
 		}

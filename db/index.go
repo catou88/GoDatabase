@@ -25,11 +25,11 @@ func (t *Table) FindByIndex(indexName string, value any) ([]map[string]any, erro
 		return nil, ErrIndexNotFound
 	}
 	column := columnByName(t.schema, index.Column)
-	encoded, err := encodeValue(column, value)
+	encoded, err := encodeIndexValue(column, value)
 	if err != nil {
 		return nil, err
 	}
-	prefix := append(indexEntryPrefix(t.schema.Name, index.Name), encoded...)
+	prefix := indexValuePrefix(t.schema.Name, index, encoded)
 	entries, err := t.db.rangeLocked(string(prefix), string(prefixEnd(prefix)))
 	if err != nil {
 		return nil, err
@@ -42,9 +42,15 @@ func (t *Table) FindByIndex(indexName string, value any) ([]map[string]any, erro
 		}
 		var primaryKey []byte
 		if index.Unique {
+			if len(entry.Key) != len(entryPrefix) {
+				return nil, ErrInvalidRow
+			}
 			primaryKey = []byte(entry.Value)
 		} else {
 			primaryKey = []byte(entry.Key[len(entryPrefix):])
+			if string(primaryKey) != entry.Value {
+				return nil, ErrInvalidRow
+			}
 		}
 		rowKey := append(rowPrefix(t.schema.Name), primaryKey...)
 		rowValue, found, err := t.db.getLocked(string(rowKey))
@@ -57,6 +63,10 @@ func (t *Table) FindByIndex(indexName string, value any) ([]map[string]any, erro
 		row, err := decodeRow(t.schema, []byte(rowValue))
 		if err != nil {
 			return nil, err
+		}
+		actual, err := encodeIndexValue(column, row[index.Column])
+		if err != nil || string(actual) != string(encoded) {
+			return nil, ErrInvalidRow
 		}
 		row[t.primaryColumn().Name], err = decodePrimaryKey(t.primaryColumn(), primaryKey)
 		if err != nil {
@@ -107,7 +117,7 @@ func (t *Table) CreateIndex(index Index) error {
 		if err != nil {
 			return err
 		}
-		indexedValue, err := encodeValue(column, row[index.Column])
+		indexedValue, err := encodeIndexValue(column, row[index.Column])
 		if err != nil {
 			return err
 		}
@@ -186,9 +196,19 @@ func indexEntryPrefix(tableName, indexName string) []byte {
 	return key
 }
 
-func indexEntryKey(tableName string, index Index, indexedValue, primaryKey []byte) string {
+// encodeIndexValue always encodes a tagged, self-delimiting component.
+func encodeIndexValue(column Column, value any) ([]byte, error) {
+	column.PrimaryKey = false
+	return encodeValue(column, value)
+}
+
+func indexValuePrefix(tableName string, index Index, encoded []byte) []byte {
 	key := indexEntryPrefix(tableName, index.Name)
-	key = append(key, indexedValue...)
+	return append(key, encoded...)
+}
+
+func indexEntryKey(tableName string, index Index, indexedValue, primaryKey []byte) string {
+	key := indexValuePrefix(tableName, index, indexedValue)
 	if !index.Unique {
 		key = append(key, primaryKey...)
 	}
@@ -199,7 +219,7 @@ func encodeIndexMetadata(index Index) string {
 	data := make([]byte, 0, 12+len(index.Column))
 	data = append(data, "GDXI"...)
 	var buf [4]byte
-	binary.LittleEndian.PutUint16(buf[:2], 1)
+	binary.LittleEndian.PutUint16(buf[:2], 2)
 	data = append(data, buf[:2]...)
 	if index.Unique {
 		data = append(data, 1)
@@ -214,11 +234,17 @@ func encodeIndexMetadata(index Index) string {
 }
 
 func decodeIndexMetadata(indexName string, data []byte) (Index, error) {
-	if len(data) < 10 || string(data[:4]) != "GDXI" || binary.LittleEndian.Uint16(data[4:6]) != 1 || data[7] != 0 {
+	if len(data) < 6 || string(data[:4]) != "GDXI" {
+		return Index{}, ErrInvalidSchema
+	}
+	if binary.LittleEndian.Uint16(data[4:6]) != 2 {
+		return Index{}, fmt.Errorf("%w: %w", ErrInvalidSchema, ErrUnsupportedRelationalFormat)
+	}
+	if len(data) < 10 || data[7] != 0 || len(indexName) == 0 || len(indexName) > 128 {
 		return Index{}, ErrInvalidSchema
 	}
 	nameLength := int(binary.LittleEndian.Uint16(data[8:10]))
-	if 10+nameLength != len(data) || data[6]&^byte(1) != 0 || nameLength == 0 {
+	if 10+nameLength != len(data) || data[6]&^byte(1) != 0 || nameLength == 0 || nameLength > 128 {
 		return Index{}, ErrInvalidSchema
 	}
 	return Index{Name: indexName, Column: string(data[10:]), Unique: data[6]&1 != 0}, nil
@@ -243,6 +269,9 @@ func loadIndexesLocked(d *Database, schema TableSchema) (map[string]Index, error
 		}
 		index, err := decodeIndexMetadata(name, []byte(entry.Value))
 		if err != nil {
+			return nil, err
+		}
+		if err := validateIndex(index, schema); err != nil {
 			return nil, err
 		}
 		indexes[name] = index
