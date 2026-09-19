@@ -1,0 +1,39 @@
+package models
+
+import (
+	"godatabase/internal/metrics"
+	"godatabase/internal/trace"
+)
+
+type ExperimentRequest struct {
+	Structure   metrics.Structure `json:"structure"`
+	Operations  []Operation       `json:"operations"`
+	DatasetSize int               `json:"dataset_size"`
+	Seed        int64             `json:"seed"`
+	Trace       bool              `json:"trace"`
+}
+type Operation struct {
+	Name  metrics.Operation `json:"name"`
+	Key   string            `json:"key,omitempty"`
+	Value string            `json:"value,omitempty"`
+	Start string            `json:"start,omitempty"`
+	End   string            `json:"end,omitempty"`
+}
+type ExperimentResult struct {
+	Structure  metrics.Structure  `json:"structure"`
+	Results    []OperationResult  `json:"results"`
+	Complexity []metrics.Metadata `json:"complexity"`
+	Metrics    Measurements       `json:"metrics"`
+	Trace      []trace.Event      `json:"trace,omitempty"`
+}
+type OperationResult struct {
+	Found bool   `json:"found,omitempty"`
+	Value string `json:"value,omitempty"`
+	Count int    `json:"count,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+type Measurements struct {
+	DurationNS int64 `json:"duration_ns"`
+	Bytes      int64 `json:"bytes_allocated"`
+	Allocs     int64 `json:"allocations"`
+}
