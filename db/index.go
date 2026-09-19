@@ -3,8 +3,6 @@ package db
 import (
 	"encoding/binary"
 	"fmt"
-
-	"godatabase/internal/btree"
 )
 
 // Index describes a secondary index on one table column.
@@ -17,13 +15,10 @@ type Index struct {
 // FindByIndex returns rows whose indexed column equals value, ordered by
 // primary key. The table row remains the authoritative source of values.
 func (t *Table) FindByIndex(indexName string, value any) ([]map[string]any, error) {
-	t.db.mu.Lock()
-	defer t.db.mu.Unlock()
+	t.db.mu.RLock()
+	defer t.db.mu.RUnlock()
 	if t.db.closed {
 		return nil, ErrClosed
-	}
-	if err := t.refreshIndexesLocked(); err != nil {
-		return nil, err
 	}
 	index, ok := t.indexes[indexName]
 	if !ok {
@@ -97,12 +92,6 @@ func (t *Table) CreateIndex(index Index) error {
 	if t.db.closed {
 		return ErrClosed
 	}
-	if t.db.writerActive {
-		return ErrWriteTransactionActive
-	}
-	if err := t.refreshIndexesLocked(); err != nil {
-		return err
-	}
 	if err := validateIndex(index, t.schema); err != nil {
 		return err
 	}
@@ -120,7 +109,7 @@ func (t *Table) CreateIndex(index Index) error {
 	if err != nil {
 		return err
 	}
-	mutations := make([]btree.Mutation, 0, len(rows)+1)
+	entries := make([]struct{ key, value string }, 0, len(rows))
 	seen := make(map[string]string, len(rows))
 	column := columnByName(t.schema, index.Column)
 	for _, entry := range rows {
@@ -140,11 +129,15 @@ func (t *Table) CreateIndex(index Index) error {
 			}
 			seen[string(indexedValue)] = string(primaryKey)
 		}
-		mutations = append(mutations, btree.Mutation{Key: []byte(key), Value: primaryKey})
+		entries = append(entries, struct{ key, value string }{key: key, value: string(primaryKey)})
 	}
-	mutations = append(mutations, btree.Mutation{Key: []byte(metadataKey), Value: []byte(encodeIndexMetadata(index))})
-	if err := t.db.applyBatchLocked(mutations); err != nil {
+	if err := t.db.setLocked(metadataKey, encodeIndexMetadata(index)); err != nil {
 		return err
+	}
+	for _, entry := range entries {
+		if err := t.db.setLocked(entry.key, entry.value); err != nil {
+			return err
+		}
 	}
 	if t.indexes == nil {
 		t.indexes = make(map[string]Index)
@@ -155,11 +148,8 @@ func (t *Table) CreateIndex(index Index) error {
 
 // Indexes returns the table's secondary-index definitions.
 func (t *Table) Indexes() []Index {
-	t.db.mu.Lock()
-	defer t.db.mu.Unlock()
-	if t.db.closed || t.refreshIndexesLocked() != nil {
-		return nil
-	}
+	t.db.mu.RLock()
+	defer t.db.mu.RUnlock()
 	indexes := make([]Index, 0, len(t.indexes))
 	for _, index := range t.indexes {
 		indexes = append(indexes, index)
