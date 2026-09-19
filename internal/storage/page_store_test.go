@@ -12,7 +12,11 @@ func TestFilePagesRoundTripAndAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close page file: %v", err)
+		}
+	}()
 
 	pages, err := OpenFilePages(file, 64)
 	if err != nil {
@@ -41,7 +45,11 @@ func TestFilePagesRejectsInvalidOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close page file: %v", err)
+		}
+	}()
 	pages, err := OpenFilePages(file, 64)
 	if err != nil {
 		t.Fatal(err)
