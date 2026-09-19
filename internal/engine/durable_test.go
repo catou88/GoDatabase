@@ -19,7 +19,11 @@ func TestDurableStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close durable store: %v", err)
+		}
+	}()
 	value, found, err := store.Get([]byte("key"))
 	if err != nil || !found || string(value) != "value" {
 		t.Fatalf("Get() = (%q, %v, %v)", value, found, err)
