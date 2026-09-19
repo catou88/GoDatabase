@@ -5,9 +5,9 @@ import (
 	"os"
 )
 
-// File is the file capability required by FilePages. It keeps page storage
-// independent from the concrete file implementation used by the composition
-// root and tests.
+// File is the capability required by fixed-page storage. Keeping this
+// interface separate from FilePages allows tests and future storage backends
+// to inject short-I/O and synchronization failures.
 type File interface {
 	io.ReaderAt
 	io.WriterAt
