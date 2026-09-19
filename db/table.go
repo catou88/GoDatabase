@@ -46,6 +46,21 @@ type Table struct {
 	indexes map[string]Index
 }
 
+// Scan returns all rows in ascending primary-key order, including empty string
+// keys. It scans only this table's row prefix and takes no value bounds.
+func (t *Table) Scan() ([]map[string]any, error) {
+	t.db.mu.RLock()
+	defer t.db.mu.RUnlock()
+	if t.db.closed {
+		return nil, ErrClosed
+	}
+	entries, err := tableRowsLocked(t.db, t.schema.Name)
+	if err != nil {
+		return nil, err
+	}
+	return t.decodeRows(entries)
+}
+
 // Range returns rows whose primary keys are between start and end, inclusive.
 // Rows are returned in ascending primary-key order.
 func (t *Table) Range(start, end any) ([]map[string]any, error) {
@@ -69,6 +84,10 @@ func (t *Table) Range(start, end any) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	return t.decodeRows(entries)
+}
+
+func (t *Table) decodeRows(entries []Item) ([]map[string]any, error) {
 	prefix := rowPrefix(t.schema.Name)
 	rows := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
@@ -602,23 +621,11 @@ func decodePrimaryKey(c Column, data []byte) (any, error) {
 		}
 		return int64(binary.BigEndian.Uint64(data) ^ (1 << 63)), nil
 	}
-	if c.Type != ColumnString || len(data) < 2 || data[len(data)-2] != 0 || data[len(data)-1] != 0 {
-		return nil, ErrInvalidRow
+	if c.Type == ColumnString {
+		// encodeRow and rowKey store string primary keys as raw bytes.
+		return string(data), nil
 	}
-	encoded := data[:len(data)-2]
-	decoded := make([]byte, 0, len(encoded))
-	for i := 0; i < len(encoded); i++ {
-		if encoded[i] != 0 {
-			decoded = append(decoded, encoded[i])
-			continue
-		}
-		if i+1 >= len(encoded) || encoded[i+1] != 0xff {
-			return nil, ErrInvalidRow
-		}
-		decoded = append(decoded, 0)
-		i++
-	}
-	return string(decoded), nil
+	return nil, ErrInvalidRow
 }
 func findPrimary(s TableSchema) Column {
 	for _, c := range s.Columns {
