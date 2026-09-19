@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"godatabase/internal/btree"
+	"godatabase/internal/engine"
 )
 
 var (
@@ -36,7 +36,7 @@ type Item struct {
 type Database struct {
 	mu           sync.RWMutex
 	data         map[string]string
-	durable      *btree.KV
+	durable      engine.Store
 	closed       bool
 	writerActive bool
 }
@@ -184,10 +184,10 @@ func (tx *Tx) commitLocked() error {
 		tx.closed = true
 		return ErrReadOnlyTransaction
 	}
-	mutations := make([]btree.Mutation, 0, len(tx.order))
+	mutations := make([]engine.Mutation, 0, len(tx.order))
 	for _, key := range tx.order {
 		change := tx.changes[key]
-		mutations = append(mutations, btree.Mutation{Key: []byte(key), Value: []byte(change.value), Delete: change.delete})
+		mutations = append(mutations, engine.Mutation{Key: []byte(key), Value: []byte(change.value), Delete: change.delete})
 	}
 	if err := tx.db.applyBatchLocked(mutations); err != nil {
 		return err
@@ -256,7 +256,7 @@ func New() *Database {
 //
 // The caller owns the returned Database and should call Close when finished.
 func Open(path string) (*Database, error) {
-	durable, err := btree.Open(path)
+	durable, err := engine.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +388,7 @@ func (d *Database) Range(start, end string) ([]Item, error) {
 }
 
 // applyBatchLocked publishes a complete mutation set while the caller holds mu.
-func (d *Database) applyBatchLocked(mutations []btree.Mutation) error {
+func (d *Database) applyBatchLocked(mutations []engine.Mutation) error {
 	if d.closed {
 		return ErrClosed
 	}
@@ -414,7 +414,7 @@ func (d *Database) applyBatchLocked(mutations []btree.Mutation) error {
 }
 
 func translateError(err error) error {
-	if errors.Is(err, btree.ErrClosed) {
+	if errors.Is(err, engine.ErrClosed) {
 		return ErrClosed
 	}
 	return err

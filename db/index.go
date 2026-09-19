@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"godatabase/internal/btree"
+	"godatabase/internal/engine"
 )
 
 // Index describes a secondary index on one table column.
@@ -120,7 +120,7 @@ func (t *Table) CreateIndex(index Index) error {
 	if err != nil {
 		return err
 	}
-	mutations := make([]btree.Mutation, 0, len(rows)+1)
+	mutations := make([]engine.Mutation, 0, len(rows)+1)
 	seen := make(map[string]string, len(rows))
 	column := columnByName(t.schema, index.Column)
 	for _, entry := range rows {
@@ -140,9 +140,9 @@ func (t *Table) CreateIndex(index Index) error {
 			}
 			seen[string(indexedValue)] = string(primaryKey)
 		}
-		mutations = append(mutations, btree.Mutation{Key: []byte(key), Value: primaryKey})
+		mutations = append(mutations, engine.Mutation{Key: []byte(key), Value: primaryKey})
 	}
-	mutations = append(mutations, btree.Mutation{Key: []byte(metadataKey), Value: []byte(encodeIndexMetadata(index))})
+	mutations = append(mutations, engine.Mutation{Key: []byte(metadataKey), Value: []byte(encodeIndexMetadata(index))})
 	if err := t.db.applyBatchLocked(mutations); err != nil {
 		return err
 	}
