@@ -36,26 +36,34 @@ const (
 )
 
 var (
+	// ErrDatabaseLocked means another open handle owns the database file.
+	ErrDatabaseLocked  = errors.New("database file is already open")
 	errInvalidPageID   = errors.New("invalid page id")
 	errInvalidPageData = errors.New("invalid page data")
 )
 
 type pageManager struct {
-	file               *os.File
-	nextPageID         uint64
-	committedPageCount uint64
-	rootPageID         uint64
-	generation         uint64
-	freePageIDs        []uint64
-	retiredPageIDs     []uint64
-	pendingFreePageIDs []uint64
-	freePageSet        map[uint64]struct{}
-	freeListPageIDs    []uint64
+	file                *os.File
+	nextPageID          uint64
+	committedPageCount  uint64
+	rootPageID          uint64
+	generation          uint64
+	freePageIDs         []uint64
+	retiredPageIDs      []uint64
+	pendingFreePageIDs  []uint64
+	freePageSet         map[uint64]struct{}
+	freeListPageIDs     []uint64
+	beforeFreeListWrite func(uint64) error
+	syncFreeList        func() error
 }
 
 func openPageManager(path string) (*pageManager, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return nil, err
+	}
+	if err := lockDatabaseFile(file); err != nil {
+		_ = file.Close()
 		return nil, err
 	}
 
@@ -66,6 +74,14 @@ func openPageManager(path string) (*pageManager, error) {
 	}
 	if info.Size() == 0 {
 		if err := file.Truncate(metadataSize); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := writeRootMetadataSlot(file, 0, rootMetadata{}); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := file.Sync(); err != nil {
 			_ = file.Close()
 			return nil, err
 		}
@@ -253,7 +269,11 @@ func (pm *pageManager) publishRoot(
 			return err
 		}
 	}
-	if err := pm.file.Sync(); err != nil {
+	syncFreeList := pm.syncFreeList
+	if syncFreeList == nil {
+		syncFreeList = pm.file.Sync
+	}
+	if err := syncFreeList(); err != nil {
 		return err
 	}
 	if err := writeRootMetadataSlot(pm.file, slot, metadata); err != nil {
@@ -347,6 +367,11 @@ func (pm *pageManager) writeFreeListSnapshot(generation, rootPageID uint64) (roo
 		})
 		if err != nil {
 			return rootMetadata{}, err
+		}
+		if pm.beforeFreeListWrite != nil {
+			if err := pm.beforeFreeListWrite(pageID); err != nil {
+				return rootMetadata{}, err
+			}
 		}
 		if err := pm.writePage(pageID, page); err != nil {
 			return rootMetadata{}, err
@@ -482,7 +507,7 @@ func readRootMetadata(file *os.File) (rootMetadata, error) {
 		}
 	}
 	if !found {
-		return rootMetadata{}, nil
+		return rootMetadata{}, fmt.Errorf("%w: no valid committed metadata", errInvalidPageData)
 	}
 	return best, nil
 }
@@ -528,6 +553,13 @@ func readRootMetadataSlot(file *os.File, slot int) (rootMetadata, error) {
 		pageCount:  binary.LittleEndian.Uint64(page[metadataPageCountOffset:]),
 	}
 	if metadata.rootPageID > metadata.pageCount {
+		return rootMetadata{}, errInvalidPageData
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return rootMetadata{}, err
+	}
+	if info.Size() < metadataSize || metadata.pageCount > uint64((info.Size()-metadataSize)/pageSize) {
 		return rootMetadata{}, errInvalidPageData
 	}
 	switch version {

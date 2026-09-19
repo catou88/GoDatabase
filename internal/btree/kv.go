@@ -287,16 +287,17 @@ func (kv *KV) rollback(
 }
 
 func (kv *KV) repair() error {
-	if err := kv.pm.close(); err != nil {
-		return err
-	}
-	pm, err := openPageManager(kv.path)
+	// Recover on the owned descriptor so no competing opener can enter here.
+	info, err := kv.pm.file.Stat()
 	if err != nil {
 		return err
 	}
+	if info.Size() < metadataSize || (info.Size()-metadataSize)%pageSize != 0 {
+		return fmt.Errorf("%w: file size %d is not page aligned", errInvalidPageData, info.Size())
+	}
+	pm := &pageManager{file: kv.pm.file, nextPageID: uint64((info.Size()-metadataSize)/pageSize) + 1}
 	pages, err := recoverCommittedPages(pm)
 	if err != nil {
-		_ = pm.close()
 		return err
 	}
 	kv.pm = pm
@@ -431,12 +432,7 @@ func recoverCommittedPages(pm *pageManager) (map[uint64]BNode, error) {
 		candidates = append(candidates, metadata)
 	}
 	if len(candidates) == 0 {
-		pm.restore(pageManagerState{nextPageID: pm.nextPageID})
-		pages := make(map[uint64]BNode)
-		if err := reconcilePageOwnership(pm, pages); err != nil {
-			return nil, err
-		}
-		return pages, nil
+		return nil, fmt.Errorf("%w: no valid committed metadata", errInvalidPageData)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].generation > candidates[j].generation
