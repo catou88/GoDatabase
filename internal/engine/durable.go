@@ -26,7 +26,7 @@ func (d *Durable) Range(start, end []byte) ([]Entry, error) {
 	}
 	result := make([]Entry, len(entries))
 	for i, entry := range entries {
-		result[i] = Entry{Key: entry.Key, Value: entry.Value}
+		result[i] = Entry(entry)
 	}
 	return result, nil
 }
