@@ -82,6 +82,9 @@ func (tx *Tx) Get(key string) (string, bool, error) {
 	if tx.closed {
 		return "", false, ErrTransactionClosed
 	}
+	if tx.db.closed {
+		return "", false, ErrClosed
+	}
 	if change, ok := tx.changes[key]; ok {
 		if change.delete {
 			return "", false, nil
@@ -103,6 +106,9 @@ func (tx *Tx) Delete(key string) (bool, error) {
 	if tx.closed {
 		return false, ErrTransactionClosed
 	}
+	if tx.db.closed {
+		return false, ErrClosed
+	}
 	if tx.readOnly {
 		return false, ErrReadOnlyTransaction
 	}
@@ -123,6 +129,9 @@ func (tx *Tx) Range(start, end string) ([]Item, error) {
 	defer tx.db.mu.RUnlock()
 	if tx.closed {
 		return nil, ErrTransactionClosed
+	}
+	if tx.db.closed {
+		return nil, ErrClosed
 	}
 	if start > end {
 		return []Item{}, nil
@@ -161,8 +170,15 @@ func (tx *Tx) Range(start, end string) ([]Item, error) {
 func (tx *Tx) Commit() error {
 	tx.db.mu.Lock()
 	defer tx.db.mu.Unlock()
+	return tx.commitLocked()
+}
+
+func (tx *Tx) commitLocked() error {
 	if tx.closed {
 		return ErrTransactionClosed
+	}
+	if tx.db.closed {
+		return ErrClosed
 	}
 	if tx.readOnly {
 		tx.closed = true
@@ -173,29 +189,8 @@ func (tx *Tx) Commit() error {
 		change := tx.changes[key]
 		mutations = append(mutations, btree.Mutation{Key: []byte(key), Value: []byte(change.value), Delete: change.delete})
 	}
-	var err error
-	if tx.db.durable != nil {
-		err = tx.db.durable.ApplyBatch(mutations)
-	} else {
-		copyData := make(map[string]string, len(tx.db.data)+len(mutations))
-		for key, value := range tx.db.data {
-			copyData[key] = value
-		}
-		for _, mutation := range mutations {
-			if mutation.Delete {
-				delete(copyData, string(mutation.Key))
-			} else {
-				copyData[string(mutation.Key)] = string(mutation.Value)
-			}
-		}
-		if tx.db.data == nil {
-			err = errors.New("database is not initialized")
-		} else {
-			tx.db.data = copyData
-		}
-	}
-	if err != nil {
-		return translateError(err)
+	if err := tx.db.applyBatchLocked(mutations); err != nil {
+		return err
 	}
 	tx.closed = true
 	tx.db.writerActive = false
@@ -221,6 +216,9 @@ func (tx *Tx) buffer(key string, value transactionChange) error {
 	defer tx.db.mu.Unlock()
 	if tx.closed {
 		return ErrTransactionClosed
+	}
+	if tx.db.closed {
+		return ErrClosed
 	}
 	if tx.readOnly {
 		return ErrReadOnlyTransaction
@@ -290,6 +288,9 @@ func (d *Database) Set(key, value string) error {
 	if d.closed {
 		return ErrClosed
 	}
+	if d.writerActive {
+		return ErrWriteTransactionActive
+	}
 	if key == "" {
 		return ErrEmptyKey
 	}
@@ -329,6 +330,9 @@ func (d *Database) Delete(key string) (bool, error) {
 	defer d.mu.Unlock()
 	if d.closed {
 		return false, ErrClosed
+	}
+	if d.writerActive {
+		return false, ErrWriteTransactionActive
 	}
 	if key == "" {
 		return false, nil
@@ -381,6 +385,32 @@ func (d *Database) Range(start, end string) ([]Item, error) {
 		items = append(items, Item{Key: key, Value: d.data[key]})
 	}
 	return items, nil
+}
+
+// applyBatchLocked publishes a complete mutation set while the caller holds mu.
+func (d *Database) applyBatchLocked(mutations []btree.Mutation) error {
+	if d.closed {
+		return ErrClosed
+	}
+	if d.durable != nil {
+		return translateError(d.durable.ApplyBatch(mutations))
+	}
+	if d.data == nil {
+		return errors.New("database is not initialized")
+	}
+	for _, mutation := range mutations {
+		if len(mutation.Key) == 0 || len(mutation.Key) > 1000 || (!mutation.Delete && len(mutation.Value) > 3000) {
+			return ErrInvalidRow
+		}
+	}
+	for _, mutation := range mutations {
+		if mutation.Delete {
+			delete(d.data, string(mutation.Key))
+		} else {
+			d.data[string(mutation.Key)] = string(mutation.Value)
+		}
+	}
+	return nil
 }
 
 func translateError(err error) error {
