@@ -6,7 +6,15 @@ import "godatabase/internal/btree"
 // implementation delegates page commit and recovery to the existing B+Tree
 // coordinator; this is the migration boundary for extracting that coordination
 // without changing the file format or commit ordering.
-type Durable struct{ store *btree.KV }
+type Durable struct{ store Store }
+
+var _ Store = (*Durable)(nil)
+
+// New constructs a durable engine around an injected store. The constructor
+// does not take ownership of the store's lifecycle beyond Close delegation.
+func New(store Store) *Durable {
+	return &Durable{store: store}
+}
 
 // Open opens or creates a durable engine at path.
 func Open(path string) (*Durable, error) {
@@ -14,13 +22,31 @@ func Open(path string) (*Durable, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Durable{store: store}, nil
+	return New(&btreeStore{store: store}), nil
 }
 
 func (d *Durable) Get(key []byte) ([]byte, bool, error) { return d.store.Get(key) }
 
 func (d *Durable) Range(start, end []byte) ([]Entry, error) {
-	entries, err := d.store.Range(start, end)
+	return d.store.Range(start, end)
+}
+
+func (d *Durable) Set(key, value []byte) error { return d.store.Set(key, value) }
+
+func (d *Durable) Delete(key []byte) (bool, error) { return d.store.Delete(key) }
+
+func (d *Durable) ApplyBatch(mutations []Mutation) error {
+	return d.store.ApplyBatch(mutations)
+}
+
+func (d *Durable) Close() error { return d.store.Close() }
+
+type btreeStore struct{ store *btree.KV }
+
+func (s *btreeStore) Get(key []byte) ([]byte, bool, error) { return s.store.Get(key) }
+
+func (s *btreeStore) Range(start, end []byte) ([]Entry, error) {
+	entries, err := s.store.Range(start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -31,16 +57,16 @@ func (d *Durable) Range(start, end []byte) ([]Entry, error) {
 	return result, nil
 }
 
-func (d *Durable) Set(key, value []byte) error { return d.store.Set(key, value) }
+func (s *btreeStore) Set(key, value []byte) error { return s.store.Set(key, value) }
 
-func (d *Durable) Delete(key []byte) (bool, error) { return d.store.Delete(key) }
+func (s *btreeStore) Delete(key []byte) (bool, error) { return s.store.Delete(key) }
 
-func (d *Durable) ApplyBatch(mutations []Mutation) error {
+func (s *btreeStore) ApplyBatch(mutations []Mutation) error {
 	changes := make([]btree.Mutation, len(mutations))
 	for i, mutation := range mutations {
 		changes[i] = btree.Mutation{Key: mutation.Key, Value: mutation.Value, Delete: mutation.Delete}
 	}
-	return d.store.ApplyBatch(changes)
+	return s.store.ApplyBatch(changes)
 }
 
-func (d *Durable) Close() error { return d.store.Close() }
+func (s *btreeStore) Close() error { return s.store.Close() }

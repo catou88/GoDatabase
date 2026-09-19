@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 )
 
 const DefaultPageSize = 4096
@@ -20,7 +19,7 @@ var (
 // FilePages provides fixed-size page I/O over a file. Page IDs start at one;
 // page zero is reserved for metadata by the database format.
 type FilePages struct {
-	file     *os.File
+	file     File
 	pageSize int
 	pages    uint64
 }
@@ -28,7 +27,7 @@ type FilePages struct {
 // OpenFilePages opens a page file without interpreting its contents. Existing
 // bytes are preserved, allowing callers to layer metadata and recovery rules
 // above this component.
-func OpenFilePages(file *os.File, pageSize int) (*FilePages, error) {
+func OpenFilePages(file File, pageSize int) (*FilePages, error) {
 	if file == nil {
 		return nil, errors.New("storage: nil file")
 	}
