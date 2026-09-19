@@ -1,7 +1,9 @@
 # GoDatabase
 
-GoDatabase provides a string-based key-value API backed by either an in-memory
-map or a durable, page-backed B+Tree.
+GoDatabase is an educational database lab for comparing data structures,
+measuring their behavior, and tracing how operations execute. It provides a
+string-based key-value API backed by either an in-memory map or a durable,
+page-backed B+Tree.
 
 ## Usage
 
@@ -47,5 +49,6 @@ recovery guarantees, free-page reuse, compatibility, and known limitations.
 See [Profiling GoDatabase](docs/profiling.md) for copy-pasteable CPU, memory,
 allocation, and execution-trace workflows.
 
-See [Architecture and Migration Plan](docs/architecture.md) for current package
-boundaries, the planned TCP/TLS service, and staged storage/engine refactoring.
+See [Educational Database Lab Architecture](docs/architecture.md) for current
+package boundaries, the experiment API direction, and staged storage/engine
+refactoring.
