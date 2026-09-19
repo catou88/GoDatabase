@@ -244,6 +244,9 @@ func (t *Table) refreshIndexesLocked() error {
 	indexes, err := loadIndexesLocked(t.db, t.schema)
 	if err != nil {
 		return err
+	}
+	t.indexes = indexes
+	return nil
 }
 
 func (t *Table) indexEntriesForRow(row map[string]any, rowKey string, allowExisting bool) ([]indexEntry, error) {
