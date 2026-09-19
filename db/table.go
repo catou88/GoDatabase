@@ -139,6 +139,9 @@ func (d *Database) CreateTable(schema TableSchema) (*Table, error) {
 	if d.closed {
 		return nil, ErrClosed
 	}
+	if d.writerActive {
+		return nil, ErrWriteTransactionActive
+	}
 	if err := validateSchema(schema); err != nil {
 		return nil, err
 	}
@@ -148,7 +151,11 @@ func (d *Database) CreateTable(schema TableSchema) (*Table, error) {
 	} else if found {
 		return nil, ErrTableExists
 	}
-	if err := d.setLocked(key, encodeDescriptor(schema)); err != nil {
+	descriptor := encodeDescriptor(schema)
+	if len(descriptor) > 3000 {
+		return nil, fmt.Errorf("%w: descriptor exceeds 3000 bytes", ErrInvalidSchema)
+	}
+	if err := d.setLocked(key, descriptor); err != nil {
 		return nil, err
 	}
 	return &Table{db: d, schema: cloneSchema(schema), indexes: make(map[string]Index)}, nil
@@ -172,6 +179,9 @@ func (d *Database) OpenTable(name string) (*Table, error) {
 	if err != nil {
 		return nil, err
 	}
+	if schema.Name != name {
+		return nil, fmt.Errorf("%w: descriptor name does not match catalog key", ErrInvalidSchema)
+	}
 	indexes, err := loadIndexesLocked(d, schema)
 	if err != nil {
 		return nil, err
@@ -184,138 +194,59 @@ func (t *Table) Schema() TableSchema { return cloneSchema(t.schema) }
 
 // Insert adds row. Existing primary keys are rejected.
 func (t *Table) Insert(row map[string]any) error {
-	t.db.mu.Lock()
-	defer t.db.mu.Unlock()
-	if t.db.closed {
-		return ErrClosed
-	}
-	key, value, err := encodeRow(t.schema, row)
-	if err != nil {
-		return err
-	}
-	if _, found, err := t.db.getLocked(key); err != nil {
-		return err
-	} else if found {
-		return ErrDuplicatePrimary
-	}
-	indexEntries, err := t.indexEntriesForRow(row, key, false)
-	if err != nil {
-		return err
-	}
-	if err := t.db.setLocked(key, value); err != nil {
-		return err
-	}
-	for _, entry := range indexEntries {
-		if err := t.db.setLocked(entry.key, entry.value); err != nil {
-			return err
-		}
-	}
-	return nil
+	return t.mutate(func(tx *Tx) error { return tx.insertRowLocked(t, row) })
 }
 
-// Update replaces an existing row with the same primary key and maintains
-// configured secondary indexes.
+// Update replaces an existing row and its secondary-index entries atomically.
 func (t *Table) Update(row map[string]any) error {
+	return t.mutate(func(tx *Tx) error { return tx.updateRowLocked(t, row) })
+}
+
+// Delete removes a row and its secondary-index entries atomically.
+func (t *Table) Delete(primaryKey any) (bool, error) {
+	var deleted bool
+	err := t.mutate(func(tx *Tx) error {
+		var err error
+		deleted, err = tx.deleteRowLocked(t, primaryKey)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return deleted, nil
+}
+
+// Standalone mutations retain the mutex through validation and publication.
+// An explicit transaction owns writer admission across multiple API calls.
+func (t *Table) mutate(change func(*Tx) error) error {
 	t.db.mu.Lock()
 	defer t.db.mu.Unlock()
 	if t.db.closed {
 		return ErrClosed
 	}
-	key, value, err := encodeRow(t.schema, row)
-	if err != nil {
+	if t.db.writerActive {
+		return ErrWriteTransactionActive
+	}
+	if err := t.refreshIndexesLocked(); err != nil {
 		return err
 	}
-	oldValue, found, err := t.db.getLocked(key)
-	if err != nil {
+	tx := &Tx{db: t.db, changes: make(map[string]transactionChange)}
+	if err := change(tx); err != nil {
 		return err
 	}
-	if !found {
-		return ErrRowNotFound
-	}
-	oldRow, err := decodeRow(t.schema, []byte(oldValue))
-	if err != nil {
-		return err
-	}
-	oldEntries, err := t.indexEntriesForRow(oldRow, key, true)
-	if err != nil {
-		return err
-	}
-	newEntries, err := t.indexEntriesForRow(row, key, true)
-	if err != nil {
-		return err
-	}
-	if err := t.db.setLocked(key, value); err != nil {
-		return err
-	}
-	for _, entry := range oldEntries {
-		if err := t.db.deleteLocked(entry.key); err != nil {
-			return err
-		}
-	}
-	for _, entry := range newEntries {
-		if err := t.db.setLocked(entry.key, entry.value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Delete removes a row and its secondary-index entries.
-func (t *Table) Delete(primaryKey any) (bool, error) {
-	t.db.mu.Lock()
-	defer t.db.mu.Unlock()
-	if t.db.closed {
-		return false, ErrClosed
-	}
-	key, err := t.rowKey(primaryKey)
-	if err != nil {
-		return false, err
-	}
-	value, found, err := t.db.getLocked(key)
-	if err != nil || !found {
-		return found, err
-	}
-	row, err := decodeRow(t.schema, []byte(value))
-	if err != nil {
-		return false, err
-	}
-	entries, err := t.indexEntriesForRow(row, key, true)
-	if err != nil {
-		return false, err
-	}
-	if err := t.db.deleteLocked(key); err != nil {
-		return false, err
-	}
-	for _, entry := range entries {
-		if err := t.db.deleteLocked(entry.key); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
+	return tx.commitLocked()
 }
 
 type indexEntry struct{ key, value string }
 
-func (t *Table) indexEntriesForRow(row map[string]any, rowKey string, allowExisting bool) ([]indexEntry, error) {
-	entries := make([]indexEntry, 0, len(t.indexes))
-	primaryKey := []byte(rowKey[len(rowPrefix(t.schema.Name)):])
-	for _, index := range t.indexes {
-		column := columnByName(t.schema, index.Column)
-		indexedValue, err := encodeValue(column, row[index.Column])
-		if err != nil {
-			return nil, err
-		}
-		key := indexEntryKey(t.schema.Name, index, indexedValue, primaryKey)
-		if index.Unique {
-			if _, found, err := t.db.getLocked(key); err != nil {
-				return nil, err
-			} else if found && !allowExisting {
-				return nil, ErrDuplicateIndexed
-			}
-		}
-		entries = append(entries, indexEntry{key: key, value: string(primaryKey)})
+// refreshIndexesLocked loads only committed definitions. The caller holds mu.
+func (t *Table) refreshIndexesLocked() error {
+	indexes, err := loadIndexesLocked(t.db, t.schema)
+	if err != nil {
+		return err
 	}
-	return entries, nil
+	t.indexes = indexes
+	return nil
 }
 
 func (t *Table) rowKey(primaryKey any) (string, error) {
@@ -341,14 +272,6 @@ func (d *Database) getLocked(key string) (string, bool, error) {
 	return v, ok, nil
 }
 
-func (d *Database) deleteLocked(key string) error {
-	if d.durable != nil {
-		_, err := d.durable.Delete([]byte(key))
-		return translateError(err)
-	}
-	delete(d.data, key)
-	return nil
-}
 func (d *Database) setLocked(key, value string) error {
 	if d.durable != nil {
 		return translateError(d.durable.Set([]byte(key), []byte(value)))
@@ -388,7 +311,7 @@ func hasPrefix(value, prefix []byte) bool {
 }
 
 func validateSchema(s TableSchema) error {
-	if len(s.Name) == 0 || len(s.Name) > 128 || len(s.Columns) == 0 {
+	if len(s.Name) == 0 || len(s.Name) > 128 || len(s.Columns) == 0 || len(s.Columns) > 65535 {
 		return ErrInvalidSchema
 	}
 	seen := map[string]bool{}
@@ -431,7 +354,7 @@ func escape(v []byte) []byte {
 func encodeDescriptor(s TableSchema) string {
 	b := []byte("GDTB")
 	var x [4]byte
-	binary.LittleEndian.PutUint16(x[:2], 1)
+	binary.LittleEndian.PutUint16(x[:2], 2)
 	b = append(b, x[:2]...)
 	b = append(b, 0, 0)
 	binary.LittleEndian.PutUint32(x[:], 1)
@@ -452,7 +375,7 @@ func encodeDescriptor(s TableSchema) string {
 	for i, c := range s.Columns {
 		binary.LittleEndian.PutUint16(x[:2], uint16(i+1))
 		b = append(b, x[:2]...)
-		b = append(b, byte(c.Type), boolByte(c.Nullable || c.PrimaryKey))
+		b = append(b, byte(c.Type), boolByte(c.Nullable))
 		binary.LittleEndian.PutUint16(x[:2], uint16(len(c.Name)))
 		b = append(b, x[:2]...)
 		b = append(b, c.Name...)
@@ -465,9 +388,19 @@ func boolByte(v bool) byte {
 	}
 	return 0
 }
+
+// ErrUnsupportedRelationalFormat rejects relational data requiring migration.
+var ErrUnsupportedRelationalFormat = errors.New("unsupported relational format: export with the original version and import into a new database")
+
 func decodeDescriptor(v string) (TableSchema, error) {
 	b := []byte(v)
-	if len(b) < 18 || string(b[:4]) != "GDTB" || binary.LittleEndian.Uint16(b[4:6]) != 1 {
+	if len(b) < 6 || string(b[:4]) != "GDTB" {
+		return TableSchema{}, ErrInvalidSchema
+	}
+	if binary.LittleEndian.Uint16(b[4:6]) != 2 {
+		return TableSchema{}, fmt.Errorf("%w: %w", ErrInvalidSchema, ErrUnsupportedRelationalFormat)
+	}
+	if len(b) < 18 || len(b) > 3000 || b[6] != 0 || b[7] != 0 || binary.LittleEndian.Uint32(b[8:12]) != 1 {
 		return TableSchema{}, ErrInvalidSchema
 	}
 	p := 6 + 2 + 4
@@ -490,11 +423,14 @@ func decodeDescriptor(v string) (TableSchema, error) {
 		id, typ, flags := binary.LittleEndian.Uint16(b[p:p+2]), ColumnType(b[p+2]), b[p+3]
 		l := int(binary.LittleEndian.Uint16(b[p+4 : p+6]))
 		p += 6
-		if id == 0 || p+l > len(b) {
+		if int(id) != i+1 || flags > 1 || (id == pk && flags != 0) || p+l > len(b) {
 			return TableSchema{}, ErrInvalidSchema
 		}
 		s.Columns = append(s.Columns, Column{Name: string(b[p : p+l]), Type: typ, PrimaryKey: id == pk, Nullable: flags&1 != 0 && id != pk})
 		p += l
+	}
+	if p != len(b) {
+		return TableSchema{}, ErrInvalidSchema
 	}
 	if err := validateSchema(s); err != nil {
 		return TableSchema{}, err
@@ -503,6 +439,14 @@ func decodeDescriptor(v string) (TableSchema, error) {
 }
 
 func encodeRow(s TableSchema, row map[string]any) (string, string, error) {
+	if len(s.Columns) > 65535 || validateSchema(s) != nil {
+		return "", "", ErrInvalidSchema
+	}
+	for name := range row {
+		if _, found := findColumn(s, name); !found {
+			return "", "", fmt.Errorf("%w: unknown column %s", ErrInvalidRow, name)
+		}
+	}
 	var pk any
 	for _, c := range s.Columns {
 		v, ok := row[c.Name]
@@ -523,7 +467,7 @@ func encodeRow(s TableSchema, row map[string]any) (string, string, error) {
 	}
 	out := []byte("GDRW")
 	var x [4]byte
-	binary.LittleEndian.PutUint16(x[:2], 1)
+	binary.LittleEndian.PutUint16(x[:2], 2)
 	out = append(out, x[:2]...)
 	binary.LittleEndian.PutUint32(x[:], 1)
 	out = append(out, x[:]...)
@@ -551,7 +495,13 @@ func encodeRow(s TableSchema, row map[string]any) (string, string, error) {
 }
 
 func decodeRow(s TableSchema, data []byte) (map[string]any, error) {
-	if len(data) < 12 || string(data[:4]) != "GDRW" || binary.LittleEndian.Uint16(data[4:6]) != 1 {
+	if len(data) < 6 || string(data[:4]) != "GDRW" {
+		return nil, ErrInvalidRow
+	}
+	if binary.LittleEndian.Uint16(data[4:6]) != 2 {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRow, ErrUnsupportedRelationalFormat)
+	}
+	if len(data) < 12 || len(data) > 3000 || len(s.Columns) > 65535 || validateSchema(s) != nil {
 		return nil, ErrInvalidRow
 	}
 	if binary.LittleEndian.Uint32(data[6:10]) != 1 {
@@ -570,9 +520,10 @@ func decodeRow(s TableSchema, data []byte) (map[string]any, error) {
 		}
 		id := binary.LittleEndian.Uint16(data[pos : pos+2])
 		flags := data[pos+2]
+		reserved := data[pos+3]
 		length := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
 		pos += 8
-		if id <= lastID || flags != 0 || pos+length > len(data) {
+		if id <= lastID || flags != 0 || reserved != 0 || length < 0 || length > len(data)-pos {
 			return nil, ErrInvalidRow
 		}
 		if id > uint16(len(s.Columns)) || s.Columns[id-1].PrimaryKey {
@@ -594,6 +545,22 @@ func decodeRow(s TableSchema, data []byte) (map[string]any, error) {
 }
 
 func decodeValue(c Column, data []byte) (any, error) {
+	if c.PrimaryKey {
+		return decodePrimaryKey(c, data)
+	}
+	if c.Type < ColumnInt64 || c.Type > ColumnBool || len(data) == 0 {
+		return nil, ErrInvalidRow
+	}
+	if data[0] == 0 {
+		if len(data) != 1 || !c.Nullable || c.PrimaryKey {
+			return nil, ErrInvalidRow
+		}
+		return nil, nil
+	}
+	if data[0] != byte(c.Type) {
+		return nil, ErrInvalidRow
+	}
+	data = data[1:]
 	switch c.Type {
 	case ColumnInt64:
 		if len(data) != 8 {
@@ -601,9 +568,17 @@ func decodeValue(c Column, data []byte) (any, error) {
 		}
 		return int64(binary.BigEndian.Uint64(data) ^ (1 << 63)), nil
 	case ColumnString:
-		return string(data), nil
+		value, ok := decodeEscapedComponent(data)
+		if !ok {
+			return nil, ErrInvalidRow
+		}
+		return value, nil
 	case ColumnBytes:
-		return append([]byte(nil), data...), nil
+		value, ok := decodeEscapedComponent(data)
+		if !ok {
+			return nil, ErrInvalidRow
+		}
+		return []byte(value), nil
 	case ColumnBool:
 		if len(data) != 1 || data[0] > 1 {
 			return nil, ErrInvalidRow
@@ -615,14 +590,10 @@ func decodeValue(c Column, data []byte) (any, error) {
 }
 
 func decodePrimaryKey(c Column, data []byte) (any, error) {
-	if c.Type == ColumnInt64 {
-		if len(data) != 8 {
-			return nil, ErrInvalidRow
-		}
+	if c.Type == ColumnInt64 && len(data) == 8 {
 		return int64(binary.BigEndian.Uint64(data) ^ (1 << 63)), nil
 	}
 	if c.Type == ColumnString {
-		// encodeRow and rowKey store string primary keys as raw bytes.
 		return string(data), nil
 	}
 	return nil, ErrInvalidRow
@@ -636,9 +607,12 @@ func findPrimary(s TableSchema) Column {
 	return Column{}
 }
 func encodeValue(c Column, v any) ([]byte, error) {
+	if c.Type < ColumnInt64 || c.Type > ColumnBool {
+		return nil, ErrInvalidRow
+	}
 	if v == nil {
-		if c.Nullable {
-			return nil, nil
+		if c.Nullable && !c.PrimaryKey {
+			return []byte{0}, nil
 		}
 		return nil, fmt.Errorf("%w: null column %s", ErrInvalidRow, c.Name)
 	}
@@ -650,28 +624,34 @@ func encodeValue(c Column, v any) ([]byte, error) {
 		}
 		var b [8]byte
 		binary.BigEndian.PutUint64(b[:], uint64(x)^(1<<63))
-		return b[:], nil
+		if c.PrimaryKey {
+			return b[:], nil
+		}
+		return append([]byte{byte(c.Type)}, b[:]...), nil
 	case ColumnString:
 		x, ok := v.(string)
 		if !ok {
 			return nil, ErrInvalidRow
 		}
-		return []byte(x), nil
+		if c.PrimaryKey {
+			return []byte(x), nil
+		}
+		return append([]byte{byte(c.Type)}, escape([]byte(x))...), nil
 	case ColumnBytes:
 		x, ok := v.([]byte)
 		if !ok {
 			return nil, ErrInvalidRow
 		}
-		return append([]byte(nil), x...), nil
+		return append([]byte{byte(c.Type)}, escape(x)...), nil
 	case ColumnBool:
 		x, ok := v.(bool)
 		if !ok {
 			return nil, ErrInvalidRow
 		}
 		if x {
-			return []byte{1}, nil
+			return []byte{byte(c.Type), 1}, nil
 		}
-		return []byte{0}, nil
+		return []byte{byte(c.Type), 0}, nil
 	}
 	return nil, ErrInvalidRow
 }
