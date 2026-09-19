@@ -13,8 +13,6 @@ var (
 	ErrEmptyKey = errors.New("key cannot be empty")
 	// ErrClosed is returned when an operation uses a closed database.
 	ErrClosed = errors.New("database is closed")
-	// ErrDatabaseLocked is returned when another handle owns the database file.
-	ErrDatabaseLocked = btree.ErrDatabaseLocked
 	// ErrTransactionClosed is returned after a transaction has finished.
 	ErrTransactionClosed = errors.New("transaction is closed")
 	// ErrReadOnlyTransaction is returned when a read-only transaction writes.
@@ -34,8 +32,7 @@ type Item struct {
 // A Database returned by Open owns its underlying file and must be closed when
 // it is no longer needed. Close is idempotent. Operations after Close return
 // ErrClosed. A Database is safe for concurrent use by multiple goroutines, but
-// durable files are held exclusively on Linux and macOS. Opening an already
-// owned file returns ErrDatabaseLocked.
+// multiple Database handles must not access the same durable file concurrently.
 type Database struct {
 	mu           sync.RWMutex
 	data         map[string]string
