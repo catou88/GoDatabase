@@ -1,7 +1,9 @@
 package sql
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 
 	"godatabase/db"
 )
@@ -14,7 +16,27 @@ type Result struct {
 
 // Execute runs a parsed statement against database.
 func Execute(database *db.Database, statement Statement) (Result, error) {
+	if database == nil {
+		return Result{}, fmt.Errorf("sql: nil database")
+	}
 	switch statement := statement.(type) {
+	case nil:
+		return Result{}, fmt.Errorf("sql: nil statement")
+	case *CreateTableStatement:
+		if statement == nil {
+			return Result{}, fmt.Errorf("sql: nil CREATE TABLE statement")
+		}
+		return executeCreateTable(database, *statement)
+	case *InsertStatement:
+		if statement == nil {
+			return Result{}, fmt.Errorf("sql: nil INSERT statement")
+		}
+		return executeInsert(database, *statement)
+	case *SelectStatement:
+		if statement == nil {
+			return Result{}, fmt.Errorf("sql: nil SELECT statement")
+		}
+		return executeSelect(database, *statement)
 	case CreateTableStatement:
 		return executeCreateTable(database, statement)
 	case InsertStatement:
@@ -49,6 +71,12 @@ func executeCreateTable(database *db.Database, statement CreateTableStatement) (
 }
 
 func executeInsert(database *db.Database, statement InsertStatement) (Result, error) {
+	if statement.Table == "" {
+		return Result{}, fmt.Errorf("sql: INSERT requires a table name")
+	}
+	if len(statement.Columns) == 0 || len(statement.Columns) != len(statement.Values) {
+		return Result{}, fmt.Errorf("sql: INSERT requires a nonempty column list with matching value count")
+	}
 	table, err := database.OpenTable(statement.Table)
 	if err != nil {
 		return Result{}, err
@@ -69,6 +97,14 @@ func executeInsert(database *db.Database, statement InsertStatement) (Result, er
 		}
 		row[name] = value
 	}
+	for _, column := range schema.Columns {
+		if _, exists := row[column.Name]; !exists {
+			if column.Nullable {
+				return Result{}, fmt.Errorf("sql: omitted nullable column %q: NULL values are unsupported", column.Name)
+			}
+			return Result{}, fmt.Errorf("sql: missing required column %q", column.Name)
+		}
+	}
 	if err := table.Insert(row); err != nil {
 		return Result{}, err
 	}
@@ -76,6 +112,12 @@ func executeInsert(database *db.Database, statement InsertStatement) (Result, er
 }
 
 func executeSelect(database *db.Database, statement SelectStatement) (Result, error) {
+	if statement.Table == "" {
+		return Result{}, fmt.Errorf("sql: SELECT requires a table name")
+	}
+	if statement.All && len(statement.Columns) != 0 || !statement.All && len(statement.Columns) == 0 {
+		return Result{}, fmt.Errorf("sql: SELECT requires either * or a nonempty column list")
+	}
 	table, err := database.OpenTable(statement.Table)
 	if err != nil {
 		return Result{}, err
@@ -91,6 +133,19 @@ func executeSelect(database *db.Database, statement SelectStatement) (Result, er
 	primary := primaryColumn(schema)
 	if primary == nil {
 		return Result{}, fmt.Errorf("sql: table %q has no primary key", statement.Table)
+	}
+	// Validate every predicate before Get or Scan, even when no rows match.
+	for _, predicate := range statement.Where {
+		column := findColumn(schema, predicate.Column)
+		if column == nil {
+			return Result{}, fmt.Errorf("sql: unknown predicate column %q", predicate.Column)
+		}
+		if !isComparison(predicate.Op) {
+			return Result{}, fmt.Errorf("sql: unsupported comparison operator %s (%d)", predicate.Op, predicate.Op)
+		}
+		if _, err := literalValue(predicate.Value, column.Type); err != nil {
+			return Result{}, fmt.Errorf("sql: predicate column %q: %w", predicate.Column, err)
+		}
 	}
 	rows, err := selectRows(table, primary, statement.Where)
 	if err != nil {
@@ -124,43 +179,39 @@ func selectRows(table *db.Table, primary *db.Column, predicates []Predicate) ([]
 		}
 		return []map[string]any{row}, nil
 	}
-	start, end, err := rangeBounds(primary, predicates)
-	if err != nil {
-		return nil, err
-	}
-	return table.Range(start, end)
-}
-
-func rangeBounds(primary *db.Column, predicates []Predicate) (any, any, error) {
-	start, end, err := minMax(primary.Type)
-	if err != nil {
-		return nil, nil, err
-	}
+	var lower, upper any
 	for _, predicate := range predicates {
 		if predicate.Column != primary.Name {
 			continue
 		}
-		value, valueErr := literalValue(predicate.Value, primary.Type)
-		if valueErr != nil {
-			return nil, nil, valueErr
-		}
 		switch predicate.Op {
-		case Equal:
-			start, end = value, value
-		case Greater, GreaterEqual:
-			start = value
-		case Less, LessEqual:
-			end = value
-		default:
-			return nil, nil, fmt.Errorf("sql: unsupported primary key operator %s", predicate.Op)
+		case Greater, GreaterEqual, Less, LessEqual:
+			value, err := literalValue(predicate.Value, primary.Type)
+			if err != nil {
+				return nil, fmt.Errorf("sql: primary key predicate: %w", err)
+			}
+			if predicate.Op == Greater || predicate.Op == GreaterEqual {
+				if lower == nil || compare(value, lower, Greater) {
+					lower = value
+				}
+			} else if upper == nil || compare(value, upper, Less) {
+				upper = value
+			}
 		}
 	}
-	return start, end, nil
+	if lower != nil && upper != nil {
+		// Range includes endpoints; matches applies strict comparisons afterward.
+		return table.Range(lower, upper)
+	}
+	return table.Scan()
 }
 
 func matches(row map[string]any, predicates []Predicate, schema db.TableSchema) bool {
 	for _, predicate := range predicates {
 		column := findColumn(schema, predicate.Column)
+		if column == nil {
+			return false
+		}
 		value, err := literalValue(predicate.Value, column.Type)
 		if err != nil || !compare(row[predicate.Column], value, predicate.Op) {
 			return false
@@ -170,48 +221,57 @@ func matches(row map[string]any, predicates []Predicate, schema db.TableSchema) 
 }
 
 func compare(left, right any, operator TokenType) bool {
+	var order int
 	switch left := left.(type) {
 	case int64:
 		right, ok := right.(int64)
 		if !ok {
 			return false
 		}
-		switch operator {
-		case Equal:
-			return left == right
-		case NotEqual:
-			return left != right
-		case Less:
-			return left < right
-		case LessEqual:
-			return left <= right
-		case Greater:
-			return left > right
-		case GreaterEqual:
-			return left >= right
+		if left < right {
+			order = -1
+		} else if left > right {
+			order = 1
 		}
 	case string:
 		right, ok := right.(string)
 		if !ok {
 			return false
 		}
-		switch operator {
-		case Equal:
-			return left == right
-		case NotEqual:
-			return left != right
-		case Less:
-			return left < right
-		case LessEqual:
-			return left <= right
-		case Greater:
-			return left > right
-		case GreaterEqual:
-			return left >= right
+		order = strings.Compare(left, right)
+	case []byte:
+		right, ok := right.([]byte)
+		if !ok {
+			return false
 		}
+		order = bytes.Compare(left, right)
 	case bool:
 		right, ok := right.(bool)
-		return ok && ((operator == Equal && left == right) || (operator == NotEqual && left != right))
+		if !ok {
+			return false
+		}
+		if left != right {
+			order = -1
+			if left {
+				order = 1
+			}
+		}
+	default:
+		return false
+	}
+	switch operator {
+	case Equal:
+		return order == 0
+	case NotEqual:
+		return order != 0
+	case Less:
+		return order < 0
+	case LessEqual:
+		return order <= 0
+	case Greater:
+		return order > 0
+	case GreaterEqual:
+		return order >= 0
 	}
 	return false
 }
@@ -225,8 +285,24 @@ func project(row map[string]any, columns []string) map[string]any {
 }
 
 func literalValue(literal Literal, columnType db.ColumnType) (any, error) {
-	if literal.Kind == Null {
-		return nil, nil
+	switch literal.Kind {
+	case Null:
+		return nil, fmt.Errorf("NULL literals are unsupported")
+	case Integer:
+		if _, ok := literal.Value.(int64); !ok {
+			return nil, fmt.Errorf("integer literal requires int64 value, got %T", literal.Value)
+		}
+	case String:
+		if _, ok := literal.Value.(string); !ok {
+			return nil, fmt.Errorf("string literal requires string value, got %T", literal.Value)
+		}
+	case True, False:
+		value, ok := literal.Value.(bool)
+		if !ok || value != (literal.Kind == True) {
+			return nil, fmt.Errorf("%s literal requires matching bool value, got %v (%T)", literal.Kind, literal.Value, literal.Value)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported literal kind %s (%d)", literal.Kind, literal.Kind)
 	}
 	switch columnType {
 	case db.ColumnInt64:
@@ -279,14 +355,4 @@ func primaryColumn(schema db.TableSchema) *db.Column {
 		}
 	}
 	return nil
-}
-
-func minMax(kind db.ColumnType) (any, any, error) {
-	switch kind {
-	case db.ColumnInt64:
-		return int64(-1 << 63), int64(1<<63 - 1), nil
-	case db.ColumnString:
-		return "", string([]byte{0xff, 0xff, 0xff, 0xff}), nil
-	}
-	return nil, nil, fmt.Errorf("sql: unsupported primary key type %d", kind)
 }
