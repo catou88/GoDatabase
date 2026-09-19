@@ -244,9 +244,28 @@ func (t *Table) refreshIndexesLocked() error {
 	indexes, err := loadIndexesLocked(t.db, t.schema)
 	if err != nil {
 		return err
+}
+
+func (t *Table) indexEntriesForRow(row map[string]any, rowKey string, allowExisting bool) ([]indexEntry, error) {
+	entries := make([]indexEntry, 0, len(t.indexes))
+	primaryKey := []byte(rowKey[len(rowPrefix(t.schema.Name)):])
+	for _, index := range t.indexes {
+		column := columnByName(t.schema, index.Column)
+		indexedValue, err := encodeIndexValue(column, row[index.Column])
+		if err != nil {
+			return nil, err
+		}
+		key := indexEntryKey(t.schema.Name, index, indexedValue, primaryKey)
+		if index.Unique {
+			if _, found, err := t.db.getLocked(key); err != nil {
+				return nil, err
+			} else if found && !allowExisting {
+				return nil, ErrDuplicateIndexed
+			}
+		}
+		entries = append(entries, indexEntry{key: key, value: string(primaryKey)})
 	}
-	t.indexes = indexes
-	return nil
+	return entries, nil
 }
 
 func (t *Table) rowKey(primaryKey any) (string, error) {
@@ -272,6 +291,14 @@ func (d *Database) getLocked(key string) (string, bool, error) {
 	return v, ok, nil
 }
 
+func (d *Database) deleteLocked(key string) error {
+	if d.durable != nil {
+		_, err := d.durable.Delete([]byte(key))
+		return translateError(err)
+	}
+	delete(d.data, key)
+	return nil
+}
 func (d *Database) setLocked(key, value string) error {
 	if d.durable != nil {
 		return translateError(d.durable.Set([]byte(key), []byte(value)))
