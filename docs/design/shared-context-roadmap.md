@@ -1,4 +1,9 @@
-# Shared LLM Context Roadmap and GitHub Issues
+# Archived: Shared LLM Context Roadmap and GitHub Issues
+
+> **Deprecated.** This document is retained as historical planning material
+> only. The active project goal is the educational database lab described in
+> [the architecture document](../architecture.md); this roadmap is not an
+> implementation plan or a statement of current guarantees.
 
 ## Purpose and Status
 
