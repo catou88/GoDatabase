@@ -166,3 +166,156 @@ func TestTransactionOperationsAfterCommitAreClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTransactionMaintainsTableAndIndexTogether(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := table.CreateIndex(db.Index{Name: "name_idx", Column: "name"}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin(db.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []map[string]any{
+		{"id": int64(1), "name": "Ada", "active": true},
+		{"id": int64(2), "name": "Grace", "active": true},
+	} {
+		if err := tx.Insert(table, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := table.FindByIndex("name_idx", "Ada")
+	if err != nil || len(rows) != 1 || rows[0]["id"] != int64(1) {
+		t.Fatalf("indexed rows after commit = (%v, %v), want Ada row", rows, err)
+	}
+
+	tx, err = database.Begin(db.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Update(table, map[string]any{"id": int64(1), "name": "Grace", "active": false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.DeleteRow(table, int64(2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertIndexedRowsMatchScan(t, table, "name_idx", "Ada")
+	assertIndexedRowsMatchScan(t, table, "name_idx", "Grace")
+}
+
+func TestTransactionalTableChangesSurviveReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.db")
+	database, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := table.CreateIndex(db.Index{Name: "name_idx", Column: "name"}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin(db.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Insert(table, map[string]any{"id": int64(4), "name": "Lin", "active": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	table, err = database.OpenTable("users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := table.FindByIndex("name_idx", "Lin")
+	if err != nil || len(rows) != 1 || rows[0]["id"] != int64(4) {
+		t.Fatalf("reopened indexed rows = (%v, %v), want Lin row", rows, err)
+	}
+}
+
+func TestFailedTransactionalTableCommitLeavesRowsAndIndexesUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.db")
+	database, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := table.CreateIndex(db.Index{Name: "name_idx", Column: "name"}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin(db.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Insert(table, map[string]any{"id": int64(5), "name": "temporary", "active": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Set(strings.Repeat("k", 1001), "invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err == nil {
+		t.Fatal("Commit() error = nil, want oversized-key error")
+	}
+	if _, found, err := table.Get(int64(5)); err != nil || found {
+		t.Fatalf("row after failed commit = (found %v, error %v), want missing", found, err)
+	}
+	rows, err := table.FindByIndex("name_idx", "temporary")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("index after failed commit = (%v, %v), want empty", rows, err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransactionalUpdateRejectsUniqueIndexConflict(t *testing.T) {
+	database := db.New()
+	table, err := database.CreateTable(testSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := table.CreateIndex(db.Index{Name: "active_idx", Column: "active", Unique: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := table.Insert(map[string]any{"id": int64(1), "name": "Ada", "active": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := table.Insert(map[string]any{"id": int64(2), "name": "Grace", "active": false}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin(db.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Update(table, map[string]any{"id": int64(2), "name": "Grace", "active": true}); !errors.Is(err, db.ErrDuplicateIndexed) {
+		t.Fatalf("Update() error = %v, want %v", err, db.ErrDuplicateIndexed)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
