@@ -402,6 +402,14 @@ Fuzz tests should compare B+Tree behavior against a simple `map[string]string` r
 
 ### Add versioned trees with concurrent readers and writers
 
+For the shared-conversation application, follow the staged implementation and
+issue templates in [Shared LLM Context Roadmap](shared-context-roadmap.md).
+The first milestone is one serialized writer with pinned snapshot readers and
+reader-safe reclamation. All mutation paths must participate in writer admission.
+Independent writer branches described below are a later design, not a prerequisite
+for real-time message sharing. Application message revisions and conversation
+branches do not require retaining a physical B+Tree root for every message.
+
 The current durable `KV` serializes reads and writes with one mutex. This is a
 correctness-first implementation: a read cannot observe a root, page map, or
 close operation changing while it traverses the tree. A later concurrency

@@ -46,3 +46,6 @@ recovery guarantees, free-page reuse, compatibility, and known limitations.
 
 See [Profiling GoDatabase](docs/profiling.md) for copy-pasteable CPU, memory,
 allocation, and execution-trace workflows.
+
+See [Architecture and Migration Plan](docs/architecture.md) for current package
+boundaries, the planned TCP/TLS service, and staged storage/engine refactoring.
