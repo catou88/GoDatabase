@@ -95,6 +95,12 @@ types. The frontend chooses a structure, workload, dataset size, and seed, then
 displays results, complexity, metrics, and trace events. It consumes HTTP and
 does not import Go packages.
 
+If the HTTP application uses MVC terminology, controllers belong in
+`internal/server`, views belong in `web`, and the experiment engine plus
+database APIs provide the model boundary. MVC stops at this application edge;
+the storage and B+Tree layers remain separated by data-oriented contracts
+because they manage pages and invariants rather than web requests.
+
 The initial service is HTTP-only. TLS, authentication, subscriptions, and a
 separate client protocol are later concerns and must not complicate the first
 educational release.
