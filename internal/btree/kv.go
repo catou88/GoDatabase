@@ -8,15 +8,15 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"godatabase/internal/structures"
 )
 
 var ErrClosed = errors.New("database is closed")
 
-// Entry is a key-value pair returned by a range scan.
-type Entry struct {
-	Key   []byte
-	Value []byte
-}
+// Entry is kept as an alias so existing btree consumers retain the local name
+// while range results use the shared educational structure contract.
+type Entry = structures.Entry
 
 // Mutation is one operation in an atomic KV batch.
 type Mutation struct {
@@ -36,6 +36,8 @@ type KV struct {
 	uncertain bool
 	hooks     kvHooks
 }
+
+var _ structures.KV = (*KV)(nil)
 
 type kvHooks struct {
 	beforePageWrite func(uint64) error

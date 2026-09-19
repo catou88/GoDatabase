@@ -1,7 +1,11 @@
 // Package engine coordinates durable database state transitions.
 package engine
 
-import "errors"
+import (
+	"errors"
+
+	"godatabase/internal/structures"
+)
 
 var ErrClosed = errors.New("database is closed")
 
@@ -14,16 +18,11 @@ type Mutation struct {
 
 // Store is the durable coordination contract consumed by higher layers.
 type Store interface {
-	Get(key []byte) ([]byte, bool, error)
-	Range(start, end []byte) ([]Entry, error)
-	Set(key, value []byte) error
-	Delete(key []byte) (bool, error)
+	structures.KV
 	ApplyBatch(mutations []Mutation) error
 	Close() error
 }
 
-// Entry is a key-value pair returned by a range operation.
-type Entry struct {
-	Key   []byte
-	Value []byte
-}
+// Entry is an alias retained for engine callers while the common operation
+// contract lives in internal/structures.
+type Entry = structures.Entry
