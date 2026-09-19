@@ -85,6 +85,13 @@ order, but each column may appear at most once. Every non-nullable column must
 be supplied. A nullable column that is omitted receives `NULL` when nullable
 row values are supported by the execution layer.
 
+Currently, every column must be supplied, including columns declared nullable.
+Execution rejects explicit `NULL` literals and omitted nullable columns because
+the current row encoding cannot reliably preserve NULL values. This restriction
+prevents SQL from writing unreadable or lossy values until nullable encoding is
+implemented. String literals supply STRING columns directly and BYTES columns
+as their literal bytes; no implicit numeric or boolean conversion is performed.
+
 Example:
 
 ```sql
@@ -115,6 +122,9 @@ SELECT id, name FROM users;
 
 Results are returned in primary-key order unless a future statement explicitly
 defines another ordering. `SELECT *` performs a table range scan.
+Unbounded scans use `Table.Scan()`, which scans the table's encoded row prefix;
+there is no fabricated maximum string key. The scan currently materializes its
+result rather than providing a streaming iterator.
 
 ## WHERE
 
@@ -148,14 +158,31 @@ Limitations:
   values are enabled; ordinary equality with `NULL` is invalid.
 - Functions, arithmetic, expressions, and subqueries are unsupported.
 
+All six comparison operators are supported for INT64, STRING, BYTES, and BOOL.
+Integers compare numerically without subtraction overflow. Strings and bytes
+compare lexicographically by bytes, without locale collation. Boolean ordering
+is `FALSE < TRUE`. Predicate columns, operators, and literal types are validated
+before fetching rows, so an invalid query fails even on an empty table or when
+another predicate would match no rows.
+
+Repeated bounds are combined independently of their order. Strict bounds are
+filtered after inclusive row retrieval, avoiding integer overflow at minimum
+and maximum values. Contradictory valid predicates return no rows; they do not
+hide invalid predicates elsewhere in the same query.
+
 ### Access Path Selection
 
-The executor should choose the simplest valid access path:
+The current executor chooses these access paths:
 
 1. Primary-key equality uses the table's primary-key lookup.
-2. A predicate with a matching secondary index uses that index.
-3. A primary-key range uses the table range scan.
-4. Other predicates scan rows in primary-key order and filter them.
+2. Explicit lower and upper primary-key bounds use the tightest supplied
+   inclusive table range, followed by filtering for strict comparisons.
+3. Unbounded, one-sided, and primary-key inequality predicates use the full
+   table-prefix scan followed by filtering.
+
+Every selected row is checked against all predicates, including predicates used
+to choose the access path. Secondary-index selection and efficient one-sided
+iterators remain future improvements; the executor does not yet use indexes.
 
 The result must be the same regardless of whether an index or full scan is
 used. Index selection is an execution detail and is not visible in query
@@ -177,6 +204,11 @@ should distinguish:
 
 Error wording may evolve, but errors must not silently reinterpret invalid
 input.
+
+`Execute` also validates directly constructed ASTs. Nil databases, nil statement
+pointers, empty projections, mismatched INSERT counts, and literal kinds whose
+Go values have the wrong type return errors instead of panicking. Both value
+and non-nil pointer forms of supported statement ASTs are accepted.
 
 ## Grammar Sketch
 

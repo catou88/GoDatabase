@@ -7,8 +7,11 @@ durability and versioned-tree guarantees of the storage engine.
 
 This document defines the intended contract. The current implementation
 provides buffered atomic KV transactions, serialized read-write transaction
-admission, and rollback. Immutable snapshot roots, reader version pinning, and
-transaction-aware table/index maintenance remain follow-up work.
+admission, rollback, and transactional table/index mutation methods. Immutable
+snapshot roots, reader version pinning, and universal write-path admission and
+atomicity remain follow-up work. Unbuffered reads observe current committed
+state. See the [architecture plan](../architecture.md) for current limitations
+and the target engine ownership boundary.
 
 ## Proposed API
 
@@ -67,7 +70,7 @@ tx, err := database.Begin(db.TxOptions{ReadOnly: true})
 if err != nil {
 	return err
 }
-defer tx.Rollback()
+defer func() { _ = tx.Rollback() }()
 
 value, found, err := tx.Get("user:1")
 ```
@@ -92,6 +95,7 @@ tx, err := database.Begin(db.TxOptions{})
 if err != nil {
 	return err
 }
+defer func() { _ = tx.Rollback() }()
 
 if err := tx.Set("user:1", "Ada"); err != nil {
 	_ = tx.Rollback()
@@ -105,6 +109,9 @@ if err := tx.Commit(); err != nil {
 A read-write transaction that is rolled back publishes no changes. A failed
 commit must restore the transaction and database in-memory state to the last
 known committed generation so retrying or reopening remains safe.
+The current transaction remains active when Commit fails; the deferred Rollback
+in the example releases writer admission on that error path. It is harmless
+after a successful Commit because Rollback is idempotent.
 
 ## Isolation Guarantee
 

@@ -138,10 +138,12 @@ unbounded growth during steady workloads by overwriting eligible page slots.
 
 ## Corruption Behavior
 
-`Open` rejects unsupported versions, misaligned or short files, invalid
-metadata checksums, malformed free-list pages, invalid page references, cycles,
-duplicate references, unsorted nodes, inconsistent parent bounds, unequal leaf
-depths, and other structural B+Tree violations.
+`Open` rejects misaligned or short files. Recovery rejects individual candidates
+with unsupported versions, invalid metadata checksums, malformed free-list pages,
+invalid page references, cycles, duplicate references, unsorted nodes,
+inconsistent parent bounds, unequal leaf depths, or other structural violations.
+It can fall back to another valid candidate. The both-slots-invalid limitation
+described above means rejection of a candidate does not always make Open fail.
 
 B+Tree data pages do not currently have checksums. Corruption that also breaks
 their structure is detected, but a bit change that leaves a page structurally
@@ -156,7 +158,11 @@ active public operation. Concurrent readers are safe, and conflicting writes
 are serialized. A transaction buffers its mutations and publishes them through
 one durable root commit. The durable engine currently serializes its operations,
 including reads, and does not yet provide concurrent snapshot readers or
-independent writer versions.
+independent writer versions. Transaction writer admission does not currently
+cover every direct write path; race safety does not imply snapshot isolation
+or isolation between buffered transactions and ordinary writes. Direct table
+mutations may commit rows and indexes separately. See the
+[architecture plan](architecture.md) for correctness prerequisites.
 
 Thread safety does not extend across separately opened handles or processes.
 
@@ -167,14 +173,18 @@ page format version 2, metadata format version 3, and free-list format version
 1. The metadata reader recognizes older metadata versions 1 and 2, but B+Tree
 pages must use the supported page format.
 
-Unsupported versions return an error; they are not automatically migrated.
+Unsupported versions are not automatically migrated. Unsupported metadata
+versions are rejected as recovery candidates, but if both slots fail decoding,
+the empty-state limitation above applies. A future format-hardening change must
+make this case an explicit error for an existing database.
 The on-disk format is still experimental, so future incompatible releases may
 require an explicit migration or rebuilding the database from an export. Back
 up durable files before upgrading across format changes.
 
 ## Known Limitations
 
-- No multi-operation atomic transactions.
+- Buffered transactions support atomic KV batches, but direct table/index
+  mutations and index creation do not yet have universal atomicity.
 - No write-ahead log or group commit.
 - No cross-process or multi-handle coordination.
 - No public snapshots or retained historical versions.
