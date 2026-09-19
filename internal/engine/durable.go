@@ -9,6 +9,7 @@ import "godatabase/internal/btree"
 type Durable struct{ store Store }
 
 var _ Store = (*Durable)(nil)
+var _ CommitCoordinator = (*Durable)(nil)
 
 // New constructs a durable engine around an injected store. The constructor
 // does not take ownership of the store's lifecycle beyond Close delegation.
