@@ -45,10 +45,34 @@ The callback helpers would automatically commit when the callback succeeds and
 roll back when it returns an error or panics. Explicit `Tx` ownership remains
 the underlying model.
 
+## Current Coordination Rules
+
+The current implementation owns transaction coordination in `db.Database` and
+durable commit coordination in `internal/engine`. The public `db.Tx` API is
+unchanged; callers do not manage roots or pages directly.
+
+- `Database.Begin` checks closed state and admits at most one read-write
+  transaction per handle.
+- The database mutex protects transaction state, writer admission, and public
+  operation coordination. Code holding it must not perform network I/O or call
+  user callbacks.
+- The engine owns page preparation, data synchronization, metadata publication,
+  and recovery restoration. It returns errors without exposing page internals.
+- A failed commit keeps the previous committed root visible and leaves the
+  transaction active until the caller rolls it back.
+- `Rollback` releases writer admission and is safe to call after a failed
+  commit. `Close` prevents new work and releases owned resources.
+
+The current durable engine delegates the established page commit and recovery
+algorithm through `internal/engine.Durable`. Physical extraction of metadata,
+free-list, and recovery code remains a follow-up that must preserve these
+contracts.
+
 ## Transaction Lifecycle
 
 1. `Begin` opens a transaction view.
-2. Operations read from the transaction's pinned version.
+2. Operations read buffered writes first and otherwise use the current
+   committed state.
 3. A read-write transaction records changes in private copy-on-write pages.
 4. `Commit` writes new pages, synchronizes them, and publishes a new root.
 5. `Rollback` discards private pages and leaves the committed root unchanged.
@@ -59,11 +83,22 @@ rolling back twice is either idempotent or returns that error; the final API
 should choose one behavior and test it consistently. This design prefers an
 idempotent `Rollback` and an error for a second `Commit`.
 
-## Read-Only Transactions
+## Future Snapshot Contract
 
-Read-only transactions pin one immutable committed root generation. They may
-run concurrently with other readers and with a writer creating a newer private
-version. They continue to see the same data for their entire lifetime:
+The future snapshot implementation will pin one immutable committed root
+generation. It is not implemented by the current transaction code. When added,
+the engine will expose the following ownership rules:
+
+- Acquisition and page-pin registration happen atomically.
+- Release is idempotent and makes the generation eligible for reuse only when
+  no snapshot, recovery slot, or active writer protects it.
+- Cancellation releases the snapshot before returning.
+- Database `Close` stops new acquisitions, waits for or cancels owned handles
+  according to the documented shutdown policy, and then closes storage.
+- Snapshot readers may run concurrently, while writers remain serialized until
+  writer admission and reclamation are independently tested.
+
+The public read-only transaction API may later use this contract:
 
 ```go
 tx, err := database.Begin(db.TxOptions{ReadOnly: true})
@@ -75,8 +110,9 @@ defer func() { _ = tx.Rollback() }()
 value, found, err := tx.Get("user:1")
 ```
 
-Read-only transactions cannot call `Set`, `Delete`, or `Commit`. They must use
-`Rollback` or an equivalent close operation to release their version pin.
+Until that implementation exists, do not claim that read-only transactions are
+repeatable snapshots or that they protect pages from reuse. Read-only
+transactions cannot call `Set`, `Delete`, or `Commit` under the current API.
 
 ## Read-Write Transactions
 
@@ -115,7 +151,7 @@ after a successful Commit because Rollback is idempotent.
 
 ## Isolation Guarantee
 
-The target isolation level is **snapshot isolation for readers with serialized
+The planned isolation level is **snapshot isolation for readers with serialized
 writes**:
 
 - A transaction reads one pinned root generation.
@@ -126,10 +162,10 @@ writes**:
 - Only one read-write transaction commits at a time on a database handle.
 - A successful commit becomes visible as one new root generation.
 
-The current implementation has not yet added immutable root pinning. A
-transaction's buffered writes are isolated until commit, but reads of keys that
-are not buffered use the database's current committed state. Full snapshot
-isolation therefore remains a follow-up implementation task.
+The current implementation has not added immutable root pinning. Buffered writes
+are isolated until commit, but reads of keys that are not buffered use the
+database's current committed state. Full snapshot isolation therefore remains
+a follow-up implementation task.
 
 This is not full serializable isolation. A future version may provide explicit
 version handles and multiple independent writers, but it must define how a
@@ -150,6 +186,20 @@ rule:
 Multiple database handles for the same durable file remain unsupported. The
 single-handle rule is required until cross-process coordination and file-locking
 semantics are designed.
+
+## Lock Ordering and Commit Publication
+
+The required lock order is:
+
+1. Acquire the database coordination lock for public state and writer admission.
+2. Call the engine while retaining ownership of the mutation decision.
+3. Let the engine coordinate page writes and metadata publication; it must not
+   call back into `db.Database` while the database lock is held.
+4. Release database ownership after commit or rollback has restored the state.
+
+Storage locks, when introduced, must be acquired below database coordination
+and released before network writes or user callbacks. No lock may be held while
+waiting for an external model, client, or unbounded stream.
 
 ## Commit and Recovery
 
