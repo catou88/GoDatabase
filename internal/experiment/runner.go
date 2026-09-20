@@ -22,6 +22,12 @@ func NewRunner(factory Factory) *Executor {
 	return &Executor{factory: factory, gate: make(chan struct{}, 1)}
 }
 func Validate(req ExperimentRequest) error {
+	if req.Version != 0 && req.Version != 1 {
+		return errors.New("unsupported session version")
+	}
+	if req.Cache != nil && (req.Cache.Capacity < 1 || req.Cache.Capacity > 256 || req.Cache.Policy != "lru") {
+		return errors.New("unsupported cache configuration")
+	}
 	if req.DatasetSize < 0 || req.DatasetSize > 5000 || req.Seed < 0 || len(req.Operations) > 128 {
 		return errors.New("workload limit exceeded")
 	}
@@ -80,6 +86,14 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 		}
 	}
 	result.Structure = req.Structure
+	var cache *structures.Cache
+	if req.Cache != nil {
+		cache, err = structures.NewCache(store, req.Cache.Capacity)
+		if err != nil {
+			return result, err
+		}
+		store = cache
+	}
 	result.Results = make([]OperationResult, 0, len(req.Operations))
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -97,6 +111,10 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 	}
 	duration := time.Since(started).Nanoseconds()
 	runtime.ReadMemStats(&after)
+	if cache != nil {
+		stats := cache.Stats()
+		result.Cache = &stats
+	}
 	result.Metrics = Measurements{DurationNS: duration, Bytes: int64(after.TotalAlloc - before.TotalAlloc), Allocs: int64(after.Mallocs - before.Mallocs), Scope: "operation loop; setup and cleanup excluded; allocations are process-wide estimates"}
 	for _, op := range []metrics.Operation{metrics.Set, metrics.Get, metrics.Delete, metrics.Range} {
 		if c, ok := metrics.DefaultCatalog().Lookup(req.Structure, op); ok {
