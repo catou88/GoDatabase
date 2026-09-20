@@ -1,17 +1,14 @@
 package controllers
 
 import (
-	"context"
 	"encoding/json"
+	"godatabase/internal/experiment"
 	"godatabase/internal/server/models"
 	"godatabase/internal/server/response"
 	"io"
 	"net/http"
 )
 
-type ExperimentRunner interface {
-	Run(context.Context, models.ExperimentRequest) (models.ExperimentResult, error)
-}
 type ExperimentController struct {
 	Runner              ExperimentRunner
 	MaxBodyBytes        int64
@@ -39,7 +36,7 @@ func (c ExperimentController) Run(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	result, err := c.Runner.Run(context.Background(), request)
+	result, err := c.Runner.Run(r.Context(), request)
 	if err != nil {
 		response.Error(w, http.StatusUnprocessableEntity, "experiment_failed")
 		return
@@ -50,6 +47,9 @@ func (c ExperimentController) Run(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, result)
 }
 func validRequest(request models.ExperimentRequest, maxOperations, maxDataset int, supported map[string]struct{}) bool {
+	if experiment.Validate(request) != nil {
+		return false
+	}
 	if request.DatasetSize < 0 || request.DatasetSize > maxDataset || len(request.Operations) > maxOperations || request.Seed < 0 {
 		return false
 	}

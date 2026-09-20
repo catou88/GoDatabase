@@ -1,0 +1,123 @@
+package experiment
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"godatabase/internal/metrics"
+	"godatabase/internal/structures"
+	"runtime"
+	"time"
+)
+
+// Executor owns one bounded experiment at a time, including setup and cleanup.
+type Executor struct {
+	factory Factory
+	gate    chan struct{}
+}
+
+func NewRunner(factory Factory) *Executor {
+	if factory == nil {
+		factory = DefaultFactory{}
+	}
+	return &Executor{factory: factory, gate: make(chan struct{}, 1)}
+}
+func Validate(req ExperimentRequest) error {
+	if req.DatasetSize < 0 || req.DatasetSize > 5000 || req.Seed < 0 || len(req.Operations) > 128 {
+		return errors.New("workload limit exceeded")
+	}
+	if req.Structure == metrics.BTreeDurable && req.DatasetSize > 1000 {
+		return errors.New("durable dataset limit exceeded")
+	}
+	for _, op := range req.Operations {
+		if len(op.Key) > 256 || len(op.Value) > 1024 || len(op.Start) > 256 || len(op.End) > 256 {
+			return errors.New("entry limit exceeded")
+		}
+		switch op.Name {
+		case metrics.Get, metrics.Set, metrics.Delete:
+			if op.Key == "" {
+				return errors.New("key is required")
+			}
+		case metrics.Range:
+			if op.Start > op.End {
+				return errors.New("reversed range")
+			}
+		default:
+			return errors.New("unsupported operation")
+		}
+	}
+	return nil
+}
+func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result ExperimentResult, err error) {
+	if err = Validate(req); err != nil {
+		return result, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	select {
+	case r.gate <- struct{}{}:
+		defer func() { <-r.gate }()
+	case <-ctx.Done():
+		return result, ctx.Err()
+	}
+	store, cleanup, err := r.factory.Open(ctx, req.Structure)
+	if err != nil {
+		return result, err
+	}
+	defer func() { err = errors.Join(err, cleanup()) }()
+	for i := 0; i < req.DatasetSize; i++ {
+		if err = ctx.Err(); err != nil {
+			return result, err
+		}
+		if err = store.Set([]byte(fmt.Sprintf("key-%06d", i)), []byte(fmt.Sprintf("value-%06d", i))); err != nil {
+			return result, err
+		}
+	}
+	result.Structure = req.Structure
+	result.Results = make([]OperationResult, 0, len(req.Operations))
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	started := time.Now()
+	for _, op := range req.Operations {
+		if err = ctx.Err(); err != nil {
+			return result, err
+		}
+		var item OperationResult
+		item, err = execute(store, op)
+		if err != nil {
+			return result, err
+		}
+		result.Results = append(result.Results, item)
+	}
+	duration := time.Since(started).Nanoseconds()
+	runtime.ReadMemStats(&after)
+	result.Metrics = Measurements{DurationNS: duration, Bytes: int64(after.TotalAlloc - before.TotalAlloc), Allocs: int64(after.Mallocs - before.Mallocs), Scope: "operation loop; setup and cleanup excluded; allocations are process-wide estimates"}
+	for _, op := range []metrics.Operation{metrics.Set, metrics.Get, metrics.Delete, metrics.Range} {
+		if c, ok := metrics.DefaultCatalog().Lookup(req.Structure, op); ok {
+			result.Complexity = append(result.Complexity, c)
+		}
+	}
+	return result, nil
+}
+func execute(store structures.KV, op Operation) (OperationResult, error) {
+	var out OperationResult
+	switch op.Name {
+	case metrics.Set:
+		return out, store.Set([]byte(op.Key), []byte(op.Value))
+	case metrics.Get:
+		v, ok, err := store.Get([]byte(op.Key))
+		out.Value = string(v)
+		out.Found = ok
+		return out, err
+	case metrics.Delete:
+		ok, err := store.Delete([]byte(op.Key))
+		out.Found = ok
+		return out, err
+	case metrics.Range:
+		entries, err := store.Range([]byte(op.Start), []byte(op.End))
+		out.Count = len(entries)
+		return out, err
+	default:
+		return out, errors.New("unsupported operation")
+	}
+}
