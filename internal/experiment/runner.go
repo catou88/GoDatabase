@@ -73,6 +73,9 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 	defer func() { err = errors.Join(err, cleanup()) }()
 	result.Request = req
 	previewSize := min(req.DatasetSize, PreviewLimit)
+	if previewSize < 0 || previewSize > PreviewLimit {
+		return result, errors.New("workload limit exceeded")
+	}
 	result.Dataset = make([]Record, 0, previewSize)
 	result.DatasetTruncated = req.DatasetSize > PreviewLimit
 	for i := 0; i < req.DatasetSize; i++ {
