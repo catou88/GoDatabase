@@ -21,6 +21,7 @@ type cacheEntry struct {
 
 // Cache is a per-experiment LRU with write-through invalidation.
 type Cache struct {
+	observer
 	backing  KV
 	capacity int
 	order    *list.List
@@ -50,10 +51,12 @@ func (c *Cache) record(start time.Time) {
 func (c *Cache) Get(key []byte) ([]byte, bool, error) {
 	if e := c.entries[string(key)]; e != nil {
 		c.stats.Hits++
+		c.emit("cache_hit", "cache", string(key), "Return cached value")
 		c.order.MoveToFront(e)
 		return bytes.Clone(e.Value.(cacheEntry).value), true, nil
 	}
 	c.stats.Misses++
+	c.emit("cache_miss", "cache", string(key), "Read through to backing structure")
 	start := time.Now()
 	value, found, err := c.backing.Get(key)
 	c.record(start)
@@ -61,12 +64,14 @@ func (c *Cache) Get(key []byte) ([]byte, bool, error) {
 		return value, found, err
 	}
 	if len(c.entries) == c.capacity {
+		c.emit("cache_eviction", "cache", c.order.Back().Value.(cacheEntry).key, "Evict least recently used entry")
 		last := c.order.Back()
 		delete(c.entries, last.Value.(cacheEntry).key)
 		c.order.Remove(last)
 		c.stats.Evictions++
 	}
 	c.entries[string(key)] = c.order.PushFront(cacheEntry{key: string(key), value: bytes.Clone(value)})
+	c.emit("cache_fill", "cache", string(key), "Cache backing result")
 	return value, true, nil
 }
 func (c *Cache) Set(key, value []byte) error {
@@ -75,6 +80,7 @@ func (c *Cache) Set(key, value []byte) error {
 	c.record(start)
 	if err == nil {
 		c.invalidate(string(key))
+		c.emit("cache_invalidation", "cache", string(key), "Invalidate after backing write")
 	}
 	return err
 }
@@ -84,10 +90,12 @@ func (c *Cache) Delete(key []byte) (bool, error) {
 	c.record(start)
 	if err == nil {
 		c.invalidate(string(key))
+		c.emit("cache_invalidation", "cache", string(key), "Invalidate after backing delete")
 	}
 	return found, err
 }
 func (c *Cache) Range(start, end []byte) ([]Entry, error) {
+	c.emit("cache_bypass", "cache", "", "Range reads backing structure")
 	at := time.Now()
 	entries, err := c.backing.Range(start, end)
 	c.record(at)

@@ -23,6 +23,7 @@ type Operation struct {
 	End   string            `json:"end,omitempty"`
 }
 type ExperimentResult struct {
+	TraceTruncated   bool                   `json:"trace_truncated"`
 	Cache            *structures.CacheStats `json:"cache,omitempty"`
 	Request          ExperimentRequest      `json:"request"`
 	Dataset          []Record               `json:"dataset"`
@@ -48,14 +49,13 @@ type Record struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
+type CacheConfig struct {
+	Capacity int    `json:"capacity"`
+	Policy   string `json:"policy"`
+}
 type Measurements struct {
 	DurationNS int64  `json:"duration_ns"`
 	Bytes      int64  `json:"bytes_allocated"`
 	Allocs     int64  `json:"allocations"`
 	Scope      string `json:"scope"`
-}
-
-type CacheConfig struct {
-	Capacity int    `json:"capacity"`
-	Policy   string `json:"policy"`
 }

@@ -1,6 +1,9 @@
 package engine
 
-import "godatabase/internal/btree"
+import (
+	"godatabase/internal/btree"
+	"godatabase/internal/trace"
+)
 
 // Durable coordinates the durable key-value lifecycle. The current
 // implementation delegates page commit and recovery to the existing B+Tree
@@ -42,7 +45,16 @@ func (d *Durable) ApplyBatch(mutations []Mutation) error {
 
 func (d *Durable) Close() error { return d.store.Close() }
 
+// SetTrace forwards the observer when the injected store supports tracing.
+func (d *Durable) SetTrace(sink trace.Sink) {
+	if store, ok := d.store.(interface{ SetTrace(trace.Sink) }); ok {
+		store.SetTrace(sink)
+	}
+}
+
 type btreeStore struct{ store *btree.KV }
+
+func (s *btreeStore) SetTrace(sink trace.Sink) { s.store.SetTrace(sink) }
 
 func (s *btreeStore) Get(key []byte) ([]byte, bool, error) { return s.store.Get(key) }
 
