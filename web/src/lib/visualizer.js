@@ -44,6 +44,7 @@ export function makeBTree(records = []) {
 
 export function activeNode(traceEvent) {
   if (!traceEvent) return "";
+  if (traceEvent.key) return `key:${traceEvent.key}`;
   if (traceEvent.node_id) return `node-${traceEvent.node_id}`;
   if (traceEvent.page_id) return `page-${traceEvent.page_id}`;
   return "";
