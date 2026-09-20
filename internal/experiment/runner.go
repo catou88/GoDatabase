@@ -72,7 +72,7 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 	if datasetPreviewCap < 0 {
 		datasetPreviewCap = 0
 	}
-	result.Dataset = make([]Record, 0, datasetPreviewCap)
+	result.Dataset = make([]Record, 0, PreviewLimit)
 	result.DatasetTruncated = req.DatasetSize > PreviewLimit
 	for i := 0; i < req.DatasetSize; i++ {
 		if err = ctx.Err(); err != nil {
