@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"godatabase/internal/structures"
+	"godatabase/internal/trace"
 )
 
 var ErrClosed = errors.New("database is closed")
@@ -27,14 +28,16 @@ type Mutation struct {
 
 // KV is a durable key-value store backed by copy-on-write B+Tree pages.
 type KV struct {
-	mu        sync.Mutex
-	path      string
-	pm        *pageManager
-	tree      pageTree
-	pages     map[uint64]BNode
-	closed    bool
-	uncertain bool
-	hooks     kvHooks
+	mu             sync.Mutex
+	path           string
+	pm             *pageManager
+	tree           pageTree
+	pages          map[uint64]BNode
+	closed         bool
+	uncertain      bool
+	hooks          kvHooks
+	traceSink      trace.Sink
+	traceOperation trace.Operation
 }
 
 var _ structures.KV = (*KV)(nil)
@@ -98,6 +101,7 @@ func (kv *KV) Close() error {
 func (kv *KV) Get(key []byte) ([]byte, bool, error) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	kv.traceOperation = trace.Get
 	if kv.closed {
 		return nil, false, ErrClosed
 	}
@@ -110,6 +114,7 @@ func (kv *KV) Get(key []byte) ([]byte, bool, error) {
 func (kv *KV) Range(start, end []byte) ([]Entry, error) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	kv.traceOperation = trace.Range
 	if kv.closed {
 		return nil, ErrClosed
 	}
@@ -129,6 +134,7 @@ func (kv *KV) Range(start, end []byte) ([]Entry, error) {
 func (kv *KV) Set(key, value []byte) error {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	kv.traceOperation = trace.Set
 	if kv.closed {
 		return ErrClosed
 	}
@@ -141,6 +147,7 @@ func (kv *KV) Set(key, value []byte) error {
 func (kv *KV) Delete(key []byte) (bool, error) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	kv.traceOperation = trace.Delete
 	if kv.closed {
 		return false, ErrClosed
 	}
@@ -164,7 +171,9 @@ func (kv *KV) ApplyBatch(mutations []Mutation) error {
 	return kv.update(func() (bool, error) {
 		changed := false
 		for _, mutation := range mutations {
+			kv.traceOperation = trace.Set
 			if mutation.Delete {
+				kv.traceOperation = trace.Delete
 				deleted, err := kv.tree.delete(mutation.Key)
 				if err != nil {
 					return false, err
@@ -202,6 +211,7 @@ func (kv *KV) update(change func() (bool, error)) error {
 
 	kv.tree.get = func(pageID uint64) BNode {
 		page, ok := working[pageID]
+		kv.emitPage(pageID, page, trace.Traversal, "read working page")
 		if !ok && callbackErr == nil {
 			callbackErr = fmt.Errorf("page %d is not loaded", pageID)
 		}
@@ -219,6 +229,7 @@ func (kv *KV) update(change func() (bool, error)) error {
 		page := BNode(append([]byte(nil), node...))
 		pending[pageID] = page
 		working[pageID] = page
+		kv.emitPage(pageID, page, "mutation", "allocate copy-on-write page (not yet committed)")
 		return pageID
 	}
 	kv.tree.del = func(pageID uint64) {
@@ -227,6 +238,8 @@ func (kv *KV) update(change func() (bool, error)) error {
 		}
 		if err := kv.pm.freePage(pageID); err != nil {
 			callbackErr = err
+		} else {
+			kv.emitPage(pageID, working[pageID], "mutation", "retire page (not yet committed)")
 		}
 	}
 
@@ -319,7 +332,11 @@ func (kv *KV) installHooks() {
 }
 
 func (kv *KV) bindTree() {
-	kv.tree.get = func(pageID uint64) BNode { return kv.pages[pageID] }
+	kv.tree.get = func(pageID uint64) BNode {
+		page := kv.pages[pageID]
+		kv.emitPage(pageID, page, trace.Traversal, "read loaded committed page")
+		return page
+	}
 	kv.tree.new = func(BNode) uint64 { panic("page allocation outside update") }
 	kv.tree.del = func(uint64) { panic("page release outside update") }
 }

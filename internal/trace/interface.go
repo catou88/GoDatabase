@@ -25,14 +25,18 @@ const (
 // Event is one serializable step in an operation. Sequence is assigned by the
 // recorder and makes event order explicit without relying on timestamps.
 type Event struct {
-	Sequence  uint64    `json:"sequence"`
-	Type      EventType `json:"type"`
-	Operation Operation `json:"operation"`
-	Structure string    `json:"structure,omitempty"`
-	Key       string    `json:"key,omitempty"`
-	NodeID    uint64    `json:"node_id,omitempty"`
-	PageID    uint64    `json:"page_id,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
+	OperationIndex int       `json:"operation_index"`
+	Layer          string    `json:"layer,omitempty"`
+	Keys           []string  `json:"keys,omitempty"`
+	Children       []uint64  `json:"children,omitempty"`
+	Sequence       uint64    `json:"sequence"`
+	Type           EventType `json:"type"`
+	Operation      Operation `json:"operation"`
+	Structure      string    `json:"structure,omitempty"`
+	Key            string    `json:"key,omitempty"`
+	NodeID         uint64    `json:"node_id,omitempty"`
+	PageID         uint64    `json:"page_id,omitempty"`
+	Detail         string    `json:"detail,omitempty"`
 }
 
 // Sink receives optional operation events. Implementations should return

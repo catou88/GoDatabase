@@ -5,6 +5,7 @@ import (
 	"errors"
 	"godatabase/internal/metrics"
 	"godatabase/internal/structures"
+	"godatabase/internal/trace"
 	"runtime"
 	"time"
 )
@@ -71,7 +72,11 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 	}
 	defer func() { err = errors.Join(err, cleanup()) }()
 	result.Request = req
-	result.Dataset = make([]Record, 0, PreviewLimit)
+	previewSize := min(req.DatasetSize, PreviewLimit)
+	if previewSize < 0 || previewSize > PreviewLimit {
+		return result, errors.New("workload limit exceeded")
+	}
+	result.Dataset = make([]Record, 0, previewSize)
 	result.DatasetTruncated = req.DatasetSize > PreviewLimit
 	for i := 0; i < req.DatasetSize; i++ {
 		if err = ctx.Err(); err != nil {
@@ -86,6 +91,13 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 		}
 	}
 	result.Structure = req.Structure
+	recorder := &trace.Bounded{}
+	if req.Trace {
+		recorder.Limit = 200
+	}
+	if observed, ok := store.(structures.Traceable); ok {
+		observed.SetTrace(recorder)
+	}
 	var cache *structures.Cache
 	if req.Cache != nil {
 		cache, err = structures.NewCache(store, req.Cache.Capacity)
@@ -93,12 +105,16 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 			return result, err
 		}
 		store = cache
+		cache.SetTrace(recorder)
 	}
 	result.Results = make([]OperationResult, 0, len(req.Operations))
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	started := time.Now()
-	for _, op := range req.Operations {
+	for index, op := range req.Operations {
+		recorder.OperationIndex = index
+		recorder.Operation = trace.Operation(op.Name)
+		recorder.Emit(trace.Event{Type: trace.OperationSelected, Layer: "request", Structure: string(req.Structure), Key: op.Key, Detail: "Start operation"})
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
@@ -108,8 +124,11 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 			return result, err
 		}
 		result.Results = append(result.Results, item)
+		recorder.Emit(trace.Event{Type: trace.ResultDelivered, Layer: "result", Key: op.Key, Detail: item.Status})
 	}
 	duration := time.Since(started).Nanoseconds()
+	result.Trace = recorder.Events()
+	result.TraceTruncated = recorder.Truncated()
 	runtime.ReadMemStats(&after)
 	if cache != nil {
 		stats := cache.Stats()
