@@ -11,6 +11,8 @@ import (
 	"godatabase/internal/trace"
 )
 
+const maxRunnerDatasetSize = 5000
+
 // BasicRunner is the local lab runner. It uses a map reference implementation
 // until the other structure adapters are connected to the experiment engine.
 type BasicRunner struct {
@@ -20,6 +22,9 @@ type BasicRunner struct {
 func (r BasicRunner) Run(ctx context.Context, request ExperimentRequest) (ExperimentResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ExperimentResult{}, err
+	}
+	if request.DatasetSize < 0 || request.DatasetSize > maxRunnerDatasetSize {
+		return ExperimentResult{}, fmt.Errorf("dataset size out of allowed range")
 	}
 	values := make(map[string]string, request.DatasetSize)
 	for i := 0; i < request.DatasetSize; i++ {
