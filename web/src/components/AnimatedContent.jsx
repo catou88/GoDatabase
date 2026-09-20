@@ -4,12 +4,11 @@ import { useEffect, useState } from "react";
 export function AnimatedContent({ children, active = true, className = "" }) {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
-    setVisible(false);
     if (!active) return undefined;
     const frame = requestAnimationFrame(() => setVisible(true));
     return () => cancelAnimationFrame(frame);
   }, [active, children]);
-  return <div className={`animated-content ${visible ? "is-visible" : ""} ${className}`}>{children}</div>;
+  return <div className={`animated-content ${active && visible ? "is-visible" : ""} ${className}`}>{children}</div>;
 }
 
 export function AnimatedMetric({ label, value, unit, active }) {
