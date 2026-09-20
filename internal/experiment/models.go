@@ -2,10 +2,13 @@ package experiment
 
 import (
 	"godatabase/internal/metrics"
+	"godatabase/internal/structures"
 	"godatabase/internal/trace"
 )
 
 type ExperimentRequest struct {
+	Version     int               `json:"version,omitempty"`
+	Cache       *CacheConfig      `json:"cache,omitempty"`
 	Structure   metrics.Structure `json:"structure"`
 	Operations  []Operation       `json:"operations"`
 	DatasetSize int               `json:"dataset_size"`
@@ -20,14 +23,15 @@ type Operation struct {
 	End   string            `json:"end,omitempty"`
 }
 type ExperimentResult struct {
-	Request          ExperimentRequest  `json:"request"`
-	Dataset          []Record           `json:"dataset"`
-	DatasetTruncated bool               `json:"dataset_truncated"`
-	Structure        metrics.Structure  `json:"structure"`
-	Results          []OperationResult  `json:"results"`
-	Complexity       []metrics.Metadata `json:"complexity"`
-	Metrics          Measurements       `json:"metrics"`
-	Trace            []trace.Event      `json:"trace,omitempty"`
+	Cache            *structures.CacheStats `json:"cache,omitempty"`
+	Request          ExperimentRequest      `json:"request"`
+	Dataset          []Record               `json:"dataset"`
+	DatasetTruncated bool                   `json:"dataset_truncated"`
+	Structure        metrics.Structure      `json:"structure"`
+	Results          []OperationResult      `json:"results"`
+	Complexity       []metrics.Metadata     `json:"complexity"`
+	Metrics          Measurements           `json:"metrics"`
+	Trace            []trace.Event          `json:"trace,omitempty"`
 }
 type OperationResult struct {
 	Operation metrics.Operation `json:"operation"`
@@ -49,4 +53,9 @@ type Measurements struct {
 	Bytes      int64  `json:"bytes_allocated"`
 	Allocs     int64  `json:"allocations"`
 	Scope      string `json:"scope"`
+}
+
+type CacheConfig struct {
+	Capacity int    `json:"capacity"`
+	Policy   string `json:"policy"`
 }
