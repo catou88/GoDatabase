@@ -81,6 +81,12 @@ or ECS, and the frontend on [AWS Amplify](https://docs.aws.amazon.com/amplify/la
 or another managed Next.js host. Keep the API private behind an API Gateway or
 load balancer when the frontend is public.
 
+App Runner storage is ephemeral, so use it for the stateless educational
+experiment API only. Do not rely on an App Runner container filesystem for
+durable database files. A future durable deployment should place storage on a
+service with an explicit persistence strategy, such as an EC2/EBS or ECS/EFS
+design, or replace the file layer with a managed database.
+
 Configure the API service with:
 
 ```text
