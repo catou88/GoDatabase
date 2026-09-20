@@ -65,7 +65,8 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 	}
 	defer func() { err = errors.Join(err, cleanup()) }()
 	result.Request = req
-	result.Dataset = make([]Record, 0, PreviewLimit)
+	previewSize := min(req.DatasetSize, PreviewLimit)
+	result.Dataset = make([]Record, 0, previewSize)
 	result.DatasetTruncated = req.DatasetSize > PreviewLimit
 	for i := 0; i < req.DatasetSize; i++ {
 		if err = ctx.Err(); err != nil {
