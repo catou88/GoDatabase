@@ -3,19 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint ."
-  },
-  "dependencies": {
-    "next": "latest",
-    "react": "latest",
-    "react-dom": "latest"
-  },
-  "devDependencies": {
-    "eslint": "^9.39.5",
-    "eslint-config-next": "^16.3.5"
-  }
+  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "eslint .", "test": "node --test src/lib/*.test.js", "test:e2e": "node --test e2e/*.test.js" },
+  "dependencies": { "next": "latest", "react": "latest", "react-dom": "latest" },
+  "devDependencies": { "eslint": "^9.39.5", "eslint-config-next": "^16.3.5" }
 }

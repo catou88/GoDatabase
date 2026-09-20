@@ -2,9 +2,9 @@ package controllers
 
 import (
 	"context"
-	"godatabase/internal/server/models"
+	"godatabase/internal/experiment"
 )
 
 type ExperimentRunner interface {
-	Run(context.Context, models.ExperimentRequest) (models.ExperimentResult, error)
+	Run(context.Context, experiment.ExperimentRequest) (experiment.ExperimentResult, error)
 }
