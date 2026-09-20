@@ -3,7 +3,6 @@ package experiment
 import (
 	"context"
 	"errors"
-	"fmt"
 	"godatabase/internal/metrics"
 	"godatabase/internal/structures"
 	"runtime"
@@ -65,11 +64,18 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 		return result, err
 	}
 	defer func() { err = errors.Join(err, cleanup()) }()
+	result.Request = req
+	result.Dataset = make([]Record, 0, min(req.DatasetSize, PreviewLimit))
+	result.DatasetTruncated = req.DatasetSize > PreviewLimit
 	for i := 0; i < req.DatasetSize; i++ {
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
-		if err = store.Set([]byte(fmt.Sprintf("key-%06d", i)), []byte(fmt.Sprintf("value-%06d", i))); err != nil {
+		record := SampleRecord(req.Seed, i)
+		if i < PreviewLimit {
+			result.Dataset = append(result.Dataset, record)
+		}
+		if err = store.Set([]byte(record.Key), []byte(record.Value)); err != nil {
 			return result, err
 		}
 	}
@@ -100,22 +106,42 @@ func (r *Executor) Run(ctx context.Context, req ExperimentRequest) (result Exper
 	return result, nil
 }
 func execute(store structures.KV, op Operation) (OperationResult, error) {
-	var out OperationResult
+	out := OperationResult{Operation: op.Name, Key: op.Key, Status: "success"}
 	switch op.Name {
 	case metrics.Set:
+		out.Value = op.Value
+		out.Status = "stored"
 		return out, store.Set([]byte(op.Key), []byte(op.Value))
 	case metrics.Get:
 		v, ok, err := store.Get([]byte(op.Key))
 		out.Value = string(v)
 		out.Found = ok
+		if ok {
+			out.Status = "found"
+		} else {
+			out.Status = "not_found"
+		}
 		return out, err
 	case metrics.Delete:
 		ok, err := store.Delete([]byte(op.Key))
 		out.Found = ok
+		if ok {
+			out.Status = "deleted"
+		} else {
+			out.Status = "not_found"
+		}
 		return out, err
 	case metrics.Range:
 		entries, err := store.Range([]byte(op.Start), []byte(op.End))
 		out.Count = len(entries)
+		out.Status = "matched"
+		if len(entries) == 0 {
+			out.Status = "empty"
+		}
+		out.Truncated = len(entries) > PreviewLimit
+		for _, entry := range entries[:min(len(entries), PreviewLimit)] {
+			out.Entries = append(out.Entries, Record{Key: string(entry.Key), Value: string(entry.Value)})
+		}
 		return out, err
 	default:
 		return out, errors.New("unsupported operation")

@@ -20,17 +20,29 @@ type Operation struct {
 	End   string            `json:"end,omitempty"`
 }
 type ExperimentResult struct {
-	Structure  metrics.Structure  `json:"structure"`
-	Results    []OperationResult  `json:"results"`
-	Complexity []metrics.Metadata `json:"complexity"`
-	Metrics    Measurements       `json:"metrics"`
-	Trace      []trace.Event      `json:"trace,omitempty"`
+	Request          ExperimentRequest  `json:"request"`
+	Dataset          []Record           `json:"dataset"`
+	DatasetTruncated bool               `json:"dataset_truncated"`
+	Structure        metrics.Structure  `json:"structure"`
+	Results          []OperationResult  `json:"results"`
+	Complexity       []metrics.Metadata `json:"complexity"`
+	Metrics          Measurements       `json:"metrics"`
+	Trace            []trace.Event      `json:"trace,omitempty"`
 }
 type OperationResult struct {
-	Found bool   `json:"found"`
+	Operation metrics.Operation `json:"operation"`
+	Key       string            `json:"key,omitempty"`
+	Status    string            `json:"status"`
+	Entries   []Record          `json:"entries,omitempty"`
+	Truncated bool              `json:"truncated,omitempty"`
+	Found     bool              `json:"found"`
+	Value     string            `json:"value"`
+	Count     int               `json:"count"`
+	Error     string            `json:"error,omitempty"`
+}
+type Record struct {
+	Key   string `json:"key"`
 	Value string `json:"value"`
-	Count int    `json:"count"`
-	Error string `json:"error,omitempty"`
 }
 type Measurements struct {
 	DurationNS int64  `json:"duration_ns"`
