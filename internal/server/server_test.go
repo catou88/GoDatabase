@@ -12,6 +12,7 @@ import (
 
 	"godatabase/internal/metrics"
 	"godatabase/internal/server/models"
+	"godatabase/internal/trace"
 )
 
 type fakeRunner struct {
@@ -87,6 +88,37 @@ func TestExperimentEndpointRejectsInvalidRequests(t *testing.T) {
 	if !reflect.DeepEqual(runner.request, models.ExperimentRequest{}) {
 		t.Fatal("runner was called for invalid request")
 	}
+}
+
+func TestExperimentEndpointRejectsUnsupportedStructure(t *testing.T) {
+	runner := &fakeRunner{}
+	handler := New(Config{Runner: runner})
+	body := `{"structure":"internal-page-node","dataset_size":1,"seed":1,"operations":[]}`
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/experiments", strings.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestExperimentEndpointBoundsTraceOutput(t *testing.T) {
+	handler := New(Config{Runner: &traceRunner{}, MaxTraceEvents: 1})
+	body := `{"structure":"map","dataset_size":1,"seed":1,"trace":true,"operations":[]}`
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/experiments", strings.NewReader(body)))
+	var result models.ExperimentResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Trace) != 1 {
+		t.Fatalf("trace length = %d, want 1", len(result.Trace))
+	}
+}
+
+type traceRunner struct{}
+
+func (traceRunner) Run(_ context.Context, request models.ExperimentRequest) (models.ExperimentResult, error) {
+	return models.ExperimentResult{Structure: request.Structure, Trace: []trace.Event{{Sequence: 1}, {Sequence: 2}}}, nil
 }
 
 func stringsContains(value, substring string) bool {

@@ -13,10 +13,12 @@ type ExperimentRunner interface {
 	Run(context.Context, models.ExperimentRequest) (models.ExperimentResult, error)
 }
 type ExperimentController struct {
-	Runner        ExperimentRunner
-	MaxBodyBytes  int64
-	MaxOperations int
-	MaxDataset    int
+	Runner              ExperimentRunner
+	MaxBodyBytes        int64
+	MaxOperations       int
+	MaxDataset          int
+	MaxTraceEvents      int
+	SupportedStructures map[string]struct{}
 }
 
 func (c ExperimentController) Run(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +35,7 @@ func (c ExperimentController) Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF || !validRequest(request, c.MaxOperations, c.MaxDataset) {
+	if err := decoder.Decode(&extra); err != io.EOF || !validRequest(request, c.MaxOperations, c.MaxDataset, c.SupportedStructures) {
 		response.Error(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -42,10 +44,16 @@ func (c ExperimentController) Run(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusUnprocessableEntity, "experiment_failed")
 		return
 	}
+	if c.MaxTraceEvents > 0 && len(result.Trace) > c.MaxTraceEvents {
+		result.Trace = result.Trace[:c.MaxTraceEvents]
+	}
 	response.JSON(w, http.StatusOK, result)
 }
-func validRequest(request models.ExperimentRequest, maxOperations, maxDataset int) bool {
+func validRequest(request models.ExperimentRequest, maxOperations, maxDataset int, supported map[string]struct{}) bool {
 	if request.DatasetSize < 0 || request.DatasetSize > maxDataset || len(request.Operations) > maxOperations || request.Seed < 0 {
+		return false
+	}
+	if _, ok := supported[string(request.Structure)]; !ok {
 		return false
 	}
 	for _, operation := range request.Operations {
