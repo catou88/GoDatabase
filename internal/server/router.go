@@ -35,6 +35,11 @@ func New(config Config) http.Handler {
 	}
 	supported := map[string]struct{}{"map": {}, "sorted-slice": {}, "btree-memory": {}, "btree-durable": {}}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
 	mux.HandleFunc("GET /api/v1/structures", controllers.StructureController{Complexity: config.Complexity}.List)
 	mux.HandleFunc("POST /api/v1/experiments", (controllers.ExperimentController{Runner: config.Runner, MaxBodyBytes: config.MaxBodyBytes, MaxOperations: config.MaxOperations, MaxDataset: config.MaxDataset, MaxTraceEvents: config.MaxTraceEvents, SupportedStructures: supported}).Run)
 	return middleware.CORS(config.AllowedOrigin)(mux)

@@ -4,9 +4,23 @@ This is a Next.js client for the Go experiment API.
 
 ## Local development
 
-Start the Go API on `http://localhost:8080`, then serve this directory. The
-API process must register `server.New(...)` with an injected experiment runner.
-The frontend does not start or own that process.
+Start the Go API from the repository root, then start Next.js:
+
+```sh
+ALGODB_FRONTEND_ORIGIN=http://localhost:3000 go run ./cmd/lab-server
+```
+
+In another terminal:
+
+```sh
+cd web
+npm install
+npm run dev
+```
+
+Check the API with `curl http://localhost:8080/healthz`. The default
+development CORS origin is `http://localhost:3000`; set
+`ALGODB_FRONTEND_ORIGIN` to the deployed frontend origin in production.
 
 ```sh
 cd web
