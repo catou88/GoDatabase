@@ -1,8 +1,11 @@
 package btree
 
+import "godatabase/internal/trace"
+
 type tree struct {
-	root    *node
-	maxKeys int
+	root     *node
+	maxKeys  int
+	observer memoryTrace
 }
 
 func (t *tree) minKeys() int {
@@ -19,10 +22,11 @@ func (t *tree) get(key string) (string, bool) {
 
 	n := t.root
 	for !n.leaf {
-		n = n.child(key)
+		t.emitNode(n, trace.Traversal, key, "visit internal node")
+		n = n.children[t.childIndex(n, key)]
 	}
-
-	idx, found := n.search(key)
+	t.emitNode(n, trace.Traversal, key, "visit leaf")
+	idx, found := t.search(n, key)
 	if !found {
 		return "", false
 	}
@@ -40,6 +44,7 @@ func (t *tree) set(key, value string) {
 			keys:   []string{key},
 			values: []string{value},
 		}
+		t.emitNode(t.root, "mutation", key, "create root leaf")
 		return
 	}
 
@@ -52,6 +57,7 @@ func (t *tree) set(key, value string) {
 		keys:     []string{split.key},
 		children: []*node{split.left, split.right},
 	}
+	t.emitNode(t.root, "mutation", key, "create root after split")
 }
 
 type nodeSplit struct {
@@ -61,25 +67,34 @@ type nodeSplit struct {
 }
 
 func (t *tree) insert(n *node, key, value string) (nodeSplit, bool) {
+	t.emitNode(n, trace.Traversal, key, "visit node for set")
 	if n.leaf {
 		insertIntoLeaf(n, key, value)
+		t.emitNode(n, "mutation", key, "store leaf entry")
 		if len(n.keys) <= t.maxKeys {
 			return nodeSplit{}, false
 		}
-		return splitLeaf(n), true
+		split := splitLeaf(n)
+		t.emitNode(split.left, "split", key, "split leaf: left")
+		t.emitNode(split.right, "split", key, "split leaf: right")
+		return split, true
 	}
 
-	childIdx := n.childIndex(key)
+	childIdx := t.childIndex(n, key)
 	childSplit, ok := t.insert(n.children[childIdx], key, value)
 	if !ok {
 		return nodeSplit{}, false
 	}
 
 	insertIntoInternal(n, childIdx, childSplit)
+	t.emitNode(n, "mutation", key, "insert separator and child")
 	if len(n.keys) <= t.maxKeys {
 		return nodeSplit{}, false
 	}
-	return splitInternal(n), true
+	split := splitInternal(n)
+	t.emitNode(split.left, "split", key, "split internal node: left")
+	t.emitNode(split.right, "split", key, "split internal node: right")
+	return split, true
 }
 
 func insertIntoLeaf(n *node, key, value string) {
@@ -154,6 +169,7 @@ func (t *tree) delete(key string) bool {
 	}
 
 	if len(t.root.keys) == 0 {
+		t.emitNode(t.root, "mutation", key, "remove empty root")
 		if t.root.leaf {
 			t.root = nil
 		} else {
@@ -165,24 +181,27 @@ func (t *tree) delete(key string) bool {
 }
 
 func (t *tree) deleteFromNode(n *node, key string) bool {
+	t.emitNode(n, trace.Traversal, key, "visit node for delete")
 	if n.leaf {
-		idx, found := n.search(key)
+		idx, found := t.search(n, key)
 		if !found {
 			return false
 		}
 		n.keys = deleteString(n.keys, idx)
 		n.values = deleteString(n.values, idx)
+		t.emitNode(n, "mutation", key, "remove leaf entry")
 		return true
 	}
 
-	childIdx := n.childIndex(key)
+	childIdx := t.childIndex(n, key)
 	deleted := t.deleteFromNode(n.children[childIdx], key)
 	if !deleted {
 		return false
 	}
 
 	if childIdx > 0 && len(n.children[childIdx].keys) > 0 {
-		n.keys[childIdx-1] = minKey(n.children[childIdx])
+		n.keys[childIdx-1] = t.minimumKey(n.children[childIdx])
+		t.emitNode(n, "mutation", key, "refresh separator")
 	}
 	if len(n.children[childIdx].keys) < t.minKeys() {
 		t.rebalanceChild(n, childIdx)
@@ -194,17 +213,27 @@ func (t *tree) deleteFromNode(n *node, key string) bool {
 func (t *tree) rebalanceChild(parent *node, childIdx int) {
 	if childIdx > 0 && len(parent.children[childIdx-1].keys) > t.minKeys() {
 		rotateFromLeft(parent, childIdx)
+		t.emitNode(parent.children[childIdx-1], "mutation", "", "rotate from left: donor")
+		t.emitNode(parent.children[childIdx], "mutation", "", "rotate from left: receiver")
+		t.emitNode(parent, "mutation", "", "rotate from left: parent")
 		return
 	}
 	if childIdx+1 < len(parent.children) && len(parent.children[childIdx+1].keys) > t.minKeys() {
 		rotateFromRight(parent, childIdx)
+		t.emitNode(parent.children[childIdx+1], "mutation", "", "rotate from right: donor")
+		t.emitNode(parent.children[childIdx], "mutation", "", "rotate from right: receiver")
+		t.emitNode(parent, "mutation", "", "rotate from right: parent")
 		return
 	}
 	if childIdx > 0 {
 		mergeChildren(parent, childIdx-1)
+		t.emitNode(parent.children[childIdx-1], "merge", "", "merged siblings")
+		t.emitNode(parent, "mutation", "", "remove merged child")
 		return
 	}
 	mergeChildren(parent, childIdx)
+	t.emitNode(parent.children[childIdx], "merge", "", "merged siblings")
+	t.emitNode(parent, "mutation", "", "remove merged child")
 }
 
 func rotateFromLeft(parent *node, childIdx int) {
@@ -265,13 +294,6 @@ func mergeChildren(parent *node, leftIdx int) {
 
 	parent.keys = deleteString(parent.keys, leftIdx)
 	parent.children = deleteNode(parent.children, leftIdx+1)
-}
-
-func minKey(n *node) string {
-	for !n.leaf {
-		n = n.children[0]
-	}
-	return n.keys[0]
 }
 
 func deleteString(values []string, idx int) []string {
