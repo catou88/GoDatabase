@@ -296,13 +296,6 @@ func mergeChildren(parent *node, leftIdx int) {
 	parent.children = deleteNode(parent.children, leftIdx+1)
 }
 
-func minKey(n *node) string {
-	for !n.leaf {
-		n = n.children[0]
-	}
-	return n.keys[0]
-}
-
 func deleteString(values []string, idx int) []string {
 	copy(values[idx:], values[idx+1:])
 	return values[:len(values)-1]
